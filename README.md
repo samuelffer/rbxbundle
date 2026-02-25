@@ -148,9 +148,9 @@ O parser:
 ---
 
 ## 📜 Licença
-MIT
+MIT License
 
 ---
 
 ## 👤 Autor
-**Samuel F**
+**@samuelffer**
