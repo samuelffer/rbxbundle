@@ -205,3 +205,13 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+# Project artifacts
+input/
+output/
+*.rbxmx
+*.rbxm
+*.rbxl
+*.rbxlx
+*.zip
