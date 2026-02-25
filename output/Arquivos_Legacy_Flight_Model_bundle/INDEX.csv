@@ -1,0 +1,6 @@
+class,name,path,file,source_len
+ModuleScript,Trainer_CONFIG,Plane_Base/Config/Trainer_CONFIG,scripts\Plane_Base\Config\Trainer_CONFIG.lua,311
+ModuleScript,World_CONFIG,ReplicatedStorage/Flight/World_CONFIG,scripts\ReplicatedStorage\Flight\World_CONFIG.lua,234
+LocalScript,Plane,StarterCharacterScripts/Plane,scripts\StarterCharacterScripts\Plane.client.lua,6765
+Script,NetworkOwner,ServerScriptService/NetworkOwner,scripts\ServerScriptService\NetworkOwner.server.lua,530
+Script,PlaneControls,ServerScriptService/PlaneControls,scripts\ServerScriptService\PlaneControls.server.lua,1104

@@ -1,0 +1,5 @@
+# Context objects (minimal)
+- Plane_Base/Config (Folder)
+- Plane_Base/Surfaces (Folder)
+- ReplicatedStorage/PlaneControls (RemoteEvent)
+- ReplicatedStorage/Flight (Folder)
