@@ -61,7 +61,7 @@ Bundle contents:
 
 ## Limitations
 
-* No dependency graph
+
 * No require resolution
 * Invalid XML may fail
 
