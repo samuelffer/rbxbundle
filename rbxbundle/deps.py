@@ -101,7 +101,14 @@ def build_dependency_graph(
             extracted_modules_by_name.setdefault(si.name, []).append(si.full_path)
 
     for s in scripts:
-        aliases = _collect_service_aliases(s.source)
+        service_aliases = _collect_service_aliases(s.source)
+        instance_aliases = _collect_instance_aliases(
+            s.source,
+            src_script_path=s.full_path,
+            nodes=nodes,
+            child_by_parent_and_name=child_by_parent_and_name,
+            service_aliases=service_aliases,
+        )
         string_fallbacks = _collect_string_fallbacks(s.source)
         var_folder_hints = _collect_var_folder_hints(s.source)
 
@@ -112,36 +119,11 @@ def build_dependency_graph(
                 src_script_path=s.full_path,
                 nodes=nodes,
                 child_by_parent_and_name=child_by_parent_and_name,
-                service_aliases=aliases,
+                service_aliases=service_aliases,
+                instance_aliases=instance_aliases,
             )
 
-            # Heuristic: resolve dynamic WaitForChild(var) when var has a literal fallback.
-            # Example:
-            #   local configName = model:GetAttribute("CurrentConfig") or "Trainer_CONFIG"
-            #   require(cfgFolder:WaitForChild(configName))
-            # We cannot know the runtime attribute value, but we can add a best-effort
-            # edge to the fallback module when it exists in the extracted bundle.
-            if resolved is None:
-                h_resolved, h_kind, h_conf = _heuristic_resolve_require(
-                    expr,
-                    service_aliases=aliases,
-                    string_fallbacks=string_fallbacks,
-                    var_folder_hints=var_folder_hints,
-                    extracted_modules_by_name=extracted_modules_by_name,
-                    nodes=nodes,
-                    child_by_parent_and_name=child_by_parent_and_name,
-                )
-                if h_resolved is not None:
-                    resolved, kind, conf = h_resolved, h_kind, h_conf
-
-            # Only point to scripts we actually have, unless you want to
-            # include non-script nodes too. For now, if resolved points to a
-            # non-script, still keep it (AI can interpret), but mark confidence.
-            if resolved is not None:
-                # if resolved is an instance path, it might be a Folder etc.
-                # keep it anyway.
-                pass
-
+            # Primary edge (always recorded)
             edge_out.append(
                 {
                     "from": s.full_path,
@@ -152,6 +134,31 @@ def build_dependency_graph(
                     "loc": {"line": call.line, "col": None} if call.line else None,
                 }
             )
+
+            # Heuristic: when unresolved dynamic WaitForChild(var) has a literal fallback,
+            # add an *additional* edge without removing the dynamic one.
+            if resolved is None:
+                h_resolved, h_kind, h_conf = _heuristic_resolve_require(
+                    expr,
+                    service_aliases=service_aliases,
+                    string_fallbacks=string_fallbacks,
+                    var_folder_hints=var_folder_hints,
+                    extracted_modules_by_name=extracted_modules_by_name,
+                    nodes=nodes,
+                    child_by_parent_and_name=child_by_parent_and_name,
+                )
+                if h_resolved is not None:
+                    edge_out.append(
+                        {
+                            "from": s.full_path,
+                            "to": h_resolved,
+                            "kind": h_kind,
+                            "expr": expr,
+                            "confidence": h_conf,
+                            "loc": {"line": call.line, "col": None} if call.line else None,
+                        }
+                    )
+
 
     return node_out, edge_out
 
@@ -453,6 +460,63 @@ def _collect_var_folder_hints(source: str) -> Dict[str, str]:
 
 
 
+
+@dataclass(frozen=True)
+class InstanceAlias:
+    path: str
+    kind: str  # instance|servicePath
+    confidence: float
+
+
+_INSTANCE_ALIAS_ASSIGN_RE = re.compile(
+    r"\blocal\s+(?P<var>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<expr>[^\n;]+)",
+    re.MULTILINE,
+)
+
+
+def _collect_instance_aliases(
+    source: str,
+    *,
+    src_script_path: str,
+    nodes: Dict[str, Node],
+    child_by_parent_and_name: Dict[Tuple[str, str], str],
+    service_aliases: Dict[str, str],
+) -> Dict[str, InstanceAlias]:
+    """Collect simple instance aliases bound to resolvable instance navigation expressions.
+
+    Examples:
+      local FlightFolder = ReplicatedStorage:WaitForChild("Flight")
+      local LibFolder = FlightFolder:WaitForChild("Lib")
+      local cfgFolder = model:WaitForChild("Config")
+
+    We only capture cases where the RHS can be resolved *statically* using the same
+    resolver as require(), and we do it in source order so aliases can chain.
+    """
+    masked = _mask_lua_comments_only(source)
+
+    out: Dict[str, InstanceAlias] = {}
+    # Iterate in source order; this allows alias chaining.
+    for m in _INSTANCE_ALIAS_ASSIGN_RE.finditer(masked):
+        var = m.group("var")
+        rhs = (m.group("expr") or "").strip()
+
+        # Ignore obvious non-instance stuff quickly.
+        if rhs.startswith("{") or rhs.startswith("function") or rhs.startswith("require"):
+            continue
+
+        resolved, kind, conf = resolve_nav_expr(
+            rhs,
+            src_script_path=src_script_path,
+            nodes=nodes,
+            child_by_parent_and_name=child_by_parent_and_name,
+            service_aliases=service_aliases,
+            instance_aliases=out,
+        )
+        if resolved is not None and conf > 0:
+            out[var] = InstanceAlias(path=resolved, kind=kind, confidence=conf)
+
+    return out
+
 # ---------------------------
 # Resolution
 # ---------------------------
@@ -465,57 +529,65 @@ _TOKEN_RE = re.compile(
 )
 
 
-def resolve_require_expr(
+def resolve_nav_expr(
     expr: str,
     *,
     src_script_path: str,
     nodes: Dict[str, Node],
     child_by_parent_and_name: Dict[Tuple[str, str], str],
     service_aliases: Dict[str, str],
+    instance_aliases: Dict[str, InstanceAlias],
 ) -> Tuple[Optional[str], str, float]:
-    """Resolve a require() argument to a bundle instance path if possible."""
+    """Resolve an instance navigation expression to a bundle path if possible.
+
+    This handles common Luau patterns for instance access and returns:
+      (resolved_path | None, kind, confidence)
+
+    kind is typically:
+      - instance
+      - servicePath
+      - dynamic (unable to resolve)
+    """
 
     expr = expr.strip()
 
-    # AssetId require (number literal)
-    if re.fullmatch(r"\d+", expr):
-        return None, "assetId", 0.0
-
-    # direct game:GetService(...) root
+    # direct game:GetService(...) root (rare to be the final require target, but useful for aliases)
     svc = _try_parse_getservice(expr)
     if svc is not None:
-        # expr might be exactly game:GetService("X") (rare to require directly)
-        # treat as unresolved service object
-        return svc, "servicePath", 0.2
+        return svc, "servicePath", 0.7
 
-    # Parse supported chain: Root (script|game:GetService|alias) then .Name / :WaitForChild("Name") / .Parent
     chain = _parse_chain(expr)
     if chain is None:
-        # Could be variable or complex expression.
         return None, "dynamic", 0.0
 
     root_kind, root_value, steps = chain
 
-    # Determine starting path
     cur: Optional[str]
     kind = "instance"
     conf = 1.0
 
     if root_kind == "script":
         cur = src_script_path
+        kind = "instance"
     elif root_kind == "service":
         cur = root_value
         kind = "servicePath"
     elif root_kind == "alias":
         svc_name = service_aliases.get(root_value)
-        if not svc_name:
-            return None, "dynamic", 0.0
-        cur = svc_name
-        kind = "servicePath"
+        if svc_name:
+            cur = svc_name
+            kind = "servicePath"
+            conf = 0.9
+        else:
+            inst = instance_aliases.get(root_value)
+            if not inst:
+                return None, "dynamic", 0.0
+            cur = inst.path
+            kind = inst.kind
+            conf = min(conf, inst.confidence)
     else:
         return None, "unknown", 0.0
 
-    # Apply steps
     for st_kind, st_val in steps:
         if cur is None:
             return None, kind, 0.0
@@ -523,7 +595,6 @@ def resolve_require_expr(
         if st_kind == "parent":
             node = nodes.get(cur)
             if node is None:
-                # service roots might not be present in nodes; try string split fallback
                 if "/" in cur:
                     cur = cur.rsplit("/", 1)[0]
                     conf = min(conf, 0.7)
@@ -543,6 +614,33 @@ def resolve_require_expr(
         return None, kind, 0.0
 
     return cur, kind, conf
+
+
+def resolve_require_expr(
+    expr: str,
+    *,
+    src_script_path: str,
+    nodes: Dict[str, Node],
+    child_by_parent_and_name: Dict[Tuple[str, str], str],
+    service_aliases: Dict[str, str],
+    instance_aliases: Dict[str, InstanceAlias],
+) -> Tuple[Optional[str], str, float]:
+    """Resolve a require() argument to a bundle instance path if possible."""
+
+    expr = expr.strip()
+
+    # AssetId require (number literal)
+    if re.fullmatch(r"\d+", expr):
+        return None, "assetId", 0.0
+
+    return resolve_nav_expr(
+        expr,
+        src_script_path=src_script_path,
+        nodes=nodes,
+        child_by_parent_and_name=child_by_parent_and_name,
+        service_aliases=service_aliases,
+        instance_aliases=instance_aliases,
+    )
 
 
 _DYNAMIC_WAITFORCHILD_RE = re.compile(
