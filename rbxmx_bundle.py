@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import base64
 import csv
 import logging
 import re
+import shutil
+import struct
 import sys
 import zipfile
 from dataclasses import dataclass, field
@@ -13,21 +16,22 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import xml.etree.ElementTree as ET
 
+
 # ----------------- Config -----------------
 INPUT_DIR = Path("input")
 OUTPUT_DIR = Path("output")
-SUPPORTED_EXTS = {".rbxmx", ".xml", ".txt"}
+SUPPORTED_EXTS = {".rbxmx", ".rbxlx", ".xml", ".txt"}
 
 SCRIPT_CLASSES = {"Script", "LocalScript", "ModuleScript"}
 
-# Alguns exports usam ProtectedString; outros podem variar.
+# Script source is usually a ProtectedString, sometimes "string" or SharedString depending on export/tooling.
 SOURCE_PROP_NAME = "Source"
 SOURCE_TAG_NAMES = {"ProtectedString", "string", "SharedString"}
 
-# Name normalmente vem em <string name="Name">...</string>
+# Name usually appears as <string name="Name">...</string>
 NAME_PROP_TAGS = {"string"}
 
-# Objetos considerados "contexto"
+# Context objects (for CONTEXT.txt)
 CONTEXT_CLASSES = {
     "RemoteEvent",
     "RemoteFunction",
@@ -42,7 +46,6 @@ CONTEXT_CLASSES = {
     "Configuration",
 }
 
-# ValueObjects cujo valor inicial faz sentido extrair
 VALUE_OBJECT_CLASSES = {
     "StringValue",
     "NumberValue",
@@ -54,13 +57,12 @@ VALUE_OBJECT_CLASSES = {
 INVALID_FS_CHARS = r'<>:"/\|?*\0'
 INVALID_FS_RE = re.compile(f"[{re.escape(INVALID_FS_CHARS)}]")
 
-# ----------------- Logging (3.1) -----------------
+
+# ----------------- Logging -----------------
 LOG = logging.getLogger("rbxbundle")
 
 
 def setup_logging() -> None:
-    # basicConfig deve ser chamado cedo; nível INFO por padrão.
-    # Você pode mudar para DEBUG editando aqui, ou via env/argumentos num passo futuro.
     logging.basicConfig(
         level=logging.INFO,
         format="%(levelname)s: %(message)s",
@@ -82,13 +84,11 @@ class ContextRecord:
     class_name: str
     name: str
     full_path: str
-    # detalhes extras (2.3): type, initial_value, etc.
     details: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
 class AttributeRecord:
-    # 2.2: Attributes por Item
     owner_class: str
     owner_name: str
     owner_path: str
@@ -97,40 +97,14 @@ class AttributeRecord:
     attr_value: str
 
 
-# ----------------- Helpers (robust) -----------------
-def ensure_dirs() -> None:
-    try:
-        INPUT_DIR.mkdir(parents=True, exist_ok=True)
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        raise RuntimeError(
-            f"Falha ao criar diretórios '{INPUT_DIR}'/'{OUTPUT_DIR}'. "
-            f"Verifique permissões. Detalhe: {e}"
-        ) from e
-
-
-def safe_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding=encoding)
-    except OSError as e:
-        raise RuntimeError(
-            f"Falha ao escrever '{path}'. Verifique permissões/espaço. Detalhe: {e}"
-        ) from e
-
-
-def safe_open_csv(path: Path):
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        return path.open("w", newline="", encoding="utf-8")
-    except OSError as e:
-        raise RuntimeError(
-            f"Falha ao abrir '{path}' para escrita. Verifique permissões. Detalhe: {e}"
-        ) from e
-
-
+# ----------------- Helpers -----------------
 def hr() -> None:
     LOG.info("-" * 64)
+
+
+def ensure_dirs() -> None:
+    INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def sanitize_filename(s: str) -> str:
@@ -139,14 +113,18 @@ def sanitize_filename(s: str) -> str:
     return s or "_"
 
 
-def read_text(path: Path) -> str:
-    try:
-        data = path.read_bytes()
-    except OSError as e:
-        raise RuntimeError(
-            f"Falha ao ler '{path}'. Verifique se existe e permissões. Detalhe: {e}"
-        ) from e
+def safe_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding=encoding)
 
+
+def safe_open_csv(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path.open("w", newline="", encoding="utf-8")
+
+
+def read_text(path: Path) -> str:
+    data = path.read_bytes()
     try:
         return data.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -157,51 +135,52 @@ def local_tag(tag: str) -> str:
     return tag.split("}", 1)[-1] if "}" in tag else tag
 
 
+def strip_junk_before_roblox(xml_text: str) -> str:
+    idx = xml_text.find("<roblox")
+    if idx > 0:
+        return xml_text[idx:]
+    return xml_text
+
+
 def list_candidates() -> List[Path]:
     files: List[Path] = []
-    try:
-        for p in sorted(INPUT_DIR.iterdir()):
-            if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS:
-                files.append(p)
-    except OSError as e:
-        raise RuntimeError(f"Falha ao listar '{INPUT_DIR}': {e}") from e
+    for p in sorted(INPUT_DIR.iterdir()):
+        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS:
+            files.append(p)
     return files
 
 
 def pick_file(files: List[Path]) -> Optional[Path]:
     hr()
-    LOG.info("Selecione um arquivo em ./input/")
+    LOG.info("Select a file from ./input/")
     hr()
     for i, p in enumerate(files, start=1):
-        try:
-            size_kb = p.stat().st_size / 1024.0
-        except OSError:
-            size_kb = 0.0
+        size_kb = p.stat().st_size / 1024.0
         LOG.info("[%d] %s (%.1f KB)", i, p.name, size_kb)
-    LOG.info("[0] Sair")
+    LOG.info("[0] Exit")
 
     while True:
-        s = input("\nNúmero: ").strip()
+        s = input("\nNumber: ").strip()
         if s.isdigit():
             n = int(s)
             if n == 0:
                 return None
             if 1 <= n <= len(files):
                 return files[n - 1]
-        LOG.error("Entrada inválida.")
+        LOG.error("Invalid input.")
 
 
 def ask_yes_no(prompt: str, default_yes: bool = True) -> bool:
-    d = "S/n" if default_yes else "s/N"
+    d = "Y/n" if default_yes else "y/N"
     while True:
         s = input(f"{prompt} [{d}]: ").strip().lower()
         if not s:
             return default_yes
-        if s in ("s", "sim", "y", "yes"):
+        if s in ("y", "yes"):
             return True
-        if s in ("n", "nao", "não", "no"):
+        if s in ("n", "no"):
             return False
-        LOG.error("Responda com S ou N.")
+        LOG.error("Please answer Y or N.")
 
 
 def get_properties_node(item: ET.Element) -> Optional[ET.Element]:
@@ -230,21 +209,11 @@ def get_source_from_properties(props: Optional[ET.Element]) -> Optional[str]:
 
 
 def get_value_from_properties(props: Optional[ET.Element]) -> Optional[str]:
-    """
-    2.3: extrai valor inicial de ValueObjects (Value property).
-    No RBXMX, geralmente:
-      <string name="Value">...</string>
-      <int name="Value">...</int>
-      <float name="Value">...</float>
-      <bool name="Value">true</bool>
-      <Object name="Value">RBXRef</Object> (ou vazio)
-    """
     if props is None:
         return None
     for p in props:
         if p.attrib.get("name") == "Value":
-            txt = p.text or ""
-            return txt.strip()
+            return (p.text or "").strip()
     return None
 
 
@@ -256,71 +225,211 @@ def iter_top_level_items(roblox_root: ET.Element) -> List[ET.Element]:
     return direct_items
 
 
-def strip_junk_before_roblox(xml_text: str) -> str:
-    idx = xml_text.find("<roblox")
-    if idx > 0:
-        return xml_text[idx:]
-    return xml_text
+# ----------------- Duplicate name handling (per-parent) -----------------
+def unique_child_name(parent_used: Dict[str, int], base_safe: str, referent: str) -> str:
+    if base_safe not in parent_used:
+        parent_used[base_safe] = 1
+        return base_safe
+    parent_used[base_safe] += 1
+    n = parent_used[base_safe]
+    tail = sanitize_filename(referent[-8:]) if referent else ""
+    return f"{base_safe}__{n}__{tail}" if tail else f"{base_safe}__{n}"
 
 
-# ----------------- 2.2 Attributes parsing -----------------
-def parse_attributes(props: Optional[ET.Element]) -> List[Tuple[str, str, str]]:
+# ----------------- AttributesSerialize decoding -----------------
+class BinReader:
+    def __init__(self, data: bytes):
+        self.data = data
+        self.i = 0
+
+    def remaining(self) -> int:
+        return len(self.data) - self.i
+
+    def read_u8(self) -> int:
+        if self.remaining() < 1:
+            raise ValueError("Unexpected EOF (u8)")
+        v = self.data[self.i]
+        self.i += 1
+        return v
+
+    def read_u32(self) -> int:
+        if self.remaining() < 4:
+            raise ValueError("Unexpected EOF (u32)")
+        v = struct.unpack_from("<I", self.data, self.i)[0]
+        self.i += 4
+        return v
+
+    def read_i32(self) -> int:
+        if self.remaining() < 4:
+            raise ValueError("Unexpected EOF (i32)")
+        v = struct.unpack_from("<i", self.data, self.i)[0]
+        self.i += 4
+        return v
+
+    def read_f32(self) -> float:
+        if self.remaining() < 4:
+            raise ValueError("Unexpected EOF (f32)")
+        v = struct.unpack_from("<f", self.data, self.i)[0]
+        self.i += 4
+        return v
+
+    def read_f64(self) -> float:
+        if self.remaining() < 8:
+            raise ValueError("Unexpected EOF (f64)")
+        v = struct.unpack_from("<d", self.data, self.i)[0]
+        self.i += 8
+        return v
+
+    def read_bytes(self, n: int) -> bytes:
+        if self.remaining() < n:
+            raise ValueError("Unexpected EOF (bytes)")
+        v = self.data[self.i : self.i + n]
+        self.i += n
+        return v
+
+    def read_string(self) -> str:
+        # String = u32 size + bytes (UTF-8)
+        n = self.read_u32()
+        raw = self.read_bytes(n)
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw.decode("utf-8", errors="replace")
+
+
+def decode_attributes_serialize(blob: bytes) -> List[Tuple[str, str, str]]:
     """
-    Retorna lista (name, type, value).
-    Heurística: Attributes podem vir como:
-      <Attributes>
-        <Attribute name="A" type="string" value="X" />
-        <Attribute name="B" type="number">1</Attribute>
-      </Attributes>
+    Decodes Instance.AttributesSerialize (binary dictionary).
+    Supported value types:
+      0x02 string
+      0x03 bool
+      0x05 float32 (number)
+      0x06 float64 (number)  <-- typical for attributes of type "number"
+    Other types are exported as "unknown(0x..)" with a short note.
     """
-    if props is None:
-        return []
-
+    r = BinReader(blob)
     out: List[Tuple[str, str, str]] = []
 
-    for node in props:
-        if local_tag(node.tag) != "Attributes":
-            continue
+    size = r.read_u32()  # number of entries
+    seen_keys: set[str] = set()
 
-        for attr in list(node):
-            if local_tag(attr.tag) != "Attribute":
-                continue
+    for _ in range(size):
+        key = r.read_string()
+        vtype = r.read_u8()
 
-            aname = (attr.attrib.get("name") or "").strip()
-            atype = (attr.attrib.get("type") or "").strip()
-            aval = attr.attrib.get("value")
+        if key in seen_keys:
+            # Spec: duplicate keys are discarded when decoding.
+            # We'll still need to skip the value bytes.
+            pass
+        else:
+            seen_keys.add(key)
 
-            if aval is None:
-                aval = (attr.text or "").strip()
-            else:
-                aval = str(aval).strip()
-
-            if aname:
-                out.append((aname, atype or "unknown", aval))
+        if vtype == 0x02:  # string
+            val = r.read_string()
+            if key in seen_keys:
+                out.append((key, "string", val))
+        elif vtype == 0x03:  # bool (u8)
+            b = r.read_u8()
+            val = "true" if b != 0 else "false"
+            if key in seen_keys:
+                out.append((key, "boolean", val))
+        elif vtype == 0x05:  # float32
+            f = r.read_f32()
+            if key in seen_keys:
+                out.append((key, "number", repr(f)))
+        elif vtype == 0x06:  # float64 (double)
+            f = r.read_f64()
+            if key in seen_keys:
+                out.append((key, "number", repr(f)))
+        elif vtype == 0x09:  # UDim (8 bytes)
+            scale = r.read_f32()
+            offset = r.read_i32()
+            if key in seen_keys:
+                out.append((key, "UDim", f"{{Scale={scale}, Offset={offset}}}"))
+        elif vtype == 0x0A:  # UDim2 (16 bytes)
+            x_scale = r.read_f32()
+            x_offset = r.read_i32()
+            y_scale = r.read_f32()
+            y_offset = r.read_i32()
+            if key in seen_keys:
+                out.append((key, "UDim2", f"{{X={{Scale={x_scale}, Offset={x_offset}}}, Y={{Scale={y_scale}, Offset={y_offset}}}}}"))
+        elif vtype == 0x0E:  # BrickColor (u32)
+            num = r.read_u32()
+            if key in seen_keys:
+                out.append((key, "BrickColor", str(num)))
+        elif vtype == 0x0F:  # Color3 (3*f32)
+            rr = r.read_f32()
+            gg = r.read_f32()
+            bb = r.read_f32()
+            if key in seen_keys:
+                out.append((key, "Color3", f"{{R={rr}, G={gg}, B={bb}}}"))
+        elif vtype == 0x10:  # Vector2 (2*f32)
+            xx = r.read_f32()
+            yy = r.read_f32()
+            if key in seen_keys:
+                out.append((key, "Vector2", f"{{X={xx}, Y={yy}}}"))
+        elif vtype == 0x11:  # Vector3 (3*f32)
+            xx = r.read_f32()
+            yy = r.read_f32()
+            zz = r.read_f32()
+            if key in seen_keys:
+                out.append((key, "Vector3", f"{{X={xx}, Y={yy}, Z={zz}}}"))
+        else:
+            # For unsupported types, we cannot reliably skip without knowing size.
+            # We'll stop decoding to avoid desync and export a warning.
+            out.append((key, f"unknown(0x{vtype:02X})", "Unsupported attribute type; decoding stopped"))
+            break
 
     return out
 
 
-# ----------------- 2.4 Duplicate name handling -----------------
-def unique_child_name(parent_used: Dict[str, int], base_safe: str, referent: str) -> str:
+def parse_attributes(props: Optional[ET.Element]) -> List[Tuple[str, str, str]]:
     """
-    Garante unicidade de nomes no MESMO nível.
-    Se já existe, suffix com contador + pedacinho do referent (mais estável).
+    Preferred: decode BinaryString property named "AttributesSerialize".
+    Fallback: legacy-like <Attributes><Attribute .../> nodes (rare in modern exports).
     """
-    key = base_safe
-    if key not in parent_used:
-        parent_used[key] = 1
-        return base_safe
+    if props is None:
+        return []
 
-    parent_used[key] += 1
-    n = parent_used[key]
+    # 1) AttributesSerialize (BinaryString Base64)
+    for p in props:
+        if p.attrib.get("name") == "AttributesSerialize" and local_tag(p.tag) == "BinaryString":
+            b64 = (p.text or "").strip()
+            if not b64:
+                return []
+            try:
+                blob = base64.b64decode(b64, validate=False)
+            except Exception:
+                # If Base64 is malformed, give up silently (still return fallback attributes if present).
+                blob = b""
+            if blob:
+                try:
+                    return decode_attributes_serialize(blob)
+                except Exception:
+                    # If decoding fails, continue to fallback parse.
+                    pass
 
-    ref_tail = sanitize_filename(referent[-8:]) if referent else ""
-    if ref_tail:
-        return f"{base_safe}__{n}__{ref_tail}"
-    return f"{base_safe}__{n}"
+    # 2) Fallback: <Attributes><Attribute .../></Attributes>
+    out: List[Tuple[str, str, str]] = []
+    for node in props:
+        if local_tag(node.tag) != "Attributes":
+            continue
+        for attr in list(node):
+            if local_tag(attr.tag) != "Attribute":
+                continue
+            aname = (attr.attrib.get("name") or "").strip()
+            atype = (attr.attrib.get("type") or "").strip() or "unknown"
+            aval = attr.attrib.get("value")
+            if aval is None:
+                aval = (attr.text or "").strip()
+            else:
+                aval = str(aval).strip()
+            if aname:
+                out.append((aname, atype, aval))
+    return out
 
 
+# ----------------- Bundle builder -----------------
 def build_bundle(in_path: Path, include_context: bool) -> Tuple[Path, Path, List[ScriptRecord]]:
     xml_text = strip_junk_before_roblox(read_text(in_path))
 
@@ -329,32 +438,28 @@ def build_bundle(in_path: Path, include_context: bool) -> Tuple[Path, Path, List
         tree = ET.ElementTree(root)
     except ET.ParseError as e:
         pos = getattr(e, "position", None)
-        where = f" (linha {pos[0]}, coluna {pos[1]})" if pos else ""
-        raise RuntimeError(f"Erro ao parsear XML{where}: {e}") from e
+        where = f" (line {pos[0]}, col {pos[1]})" if pos else ""
+        raise RuntimeError(f"XML parse error{where}: {e}") from e
 
     roblox_root = tree.getroot()
-    if local_tag(roblox_root.tag).lower() != "roblox":
-        LOG.warning("Aviso: raiz do XML não é <roblox>. Tentando continuar...")
-
     top_items = iter_top_level_items(roblox_root)
     if not top_items:
-        raise RuntimeError("Não encontrei <Item> de topo no XML. Export pode estar incompleto/corrompido.")
+        raise RuntimeError("No top-level <Item> found. Export may be incomplete/corrupted.")
 
     bundle_dir = OUTPUT_DIR / f"{in_path.stem}_bundle"
-    scripts_dir = bundle_dir / "scripts"
 
-    try:
-        bundle_dir.mkdir(parents=True, exist_ok=True)
-        scripts_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        raise RuntimeError(f"Falha ao criar diretórios em '{bundle_dir}': {e}") from e
+    # ✅ Fix: wipe old bundle dir to prevent mixed outputs (folders + loose files)
+    if bundle_dir.exists():
+        shutil.rmtree(bundle_dir, ignore_errors=True)
+
+    scripts_dir = bundle_dir / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
 
     scripts: List[ScriptRecord] = []
     contexts: List[ContextRecord] = []
     attributes: List[AttributeRecord] = []
     hierarchy_lines: List[str] = []
 
-    # mapa de usados por "parent_path" para tratar duplicados (2.4)
     used_names_by_parent: Dict[str, Dict[str, int]] = {}
 
     def walk(item: ET.Element, parent_path: str, depth: int) -> None:
@@ -374,7 +479,7 @@ def build_bundle(in_path: Path, include_context: bool) -> Tuple[Path, Path, List
         indent = " " * depth
         hierarchy_lines.append(f"{indent}- {safe_name} ({class_name})")
 
-        # 2.2: Attributes por item
+        # Attributes (correct decoding from AttributesSerialize)
         for aname, atype, aval in parse_attributes(props):
             attributes.append(
                 AttributeRecord(
@@ -387,7 +492,7 @@ def build_bundle(in_path: Path, include_context: bool) -> Tuple[Path, Path, List
                 )
             )
 
-        # 2.3: Contexto mais detalhado
+        # Context (detailed)
         if include_context and class_name in CONTEXT_CLASSES:
             detail: Dict[str, str] = {}
             if class_name in {"RemoteEvent", "RemoteFunction"}:
@@ -401,7 +506,6 @@ def build_bundle(in_path: Path, include_context: bool) -> Tuple[Path, Path, List
                     detail["initial_value"] = v
             else:
                 detail["kind"] = "Context"
-
             contexts.append(ContextRecord(class_name=class_name, name=name, full_path=full_path, details=detail))
 
         # Scripts
@@ -413,11 +517,14 @@ def build_bundle(in_path: Path, include_context: bool) -> Tuple[Path, Path, List
                 else ".lua"
             )
 
-            # 2.4: nome do arquivo exportado deve ser único (usa full_path “achatado”)
-            # (além do esquema por pastas; isso elimina qualquer colisão residual)
-            flat = sanitize_filename(full_path.replace("/", "_"))
-            rel = Path(flat).with_suffix(suffix)
+            # ✅ Fix: NO loose scripts. Always export inside the hierarchy folder structure.
+            parts = [sanitize_filename(p) for p in full_path.split("/")]
+            # File name is the leaf object name; parent directories are the rest.
+            dir_parts = parts[:-1]
+            file_base = parts[-1]
+            rel = Path(*dir_parts) / f"{file_base}{suffix}"
             out_file = scripts_dir / rel
+            out_file.parent.mkdir(parents=True, exist_ok=True)
 
             header = (
                 f"-- Extracted from RBXMX\n"
@@ -454,7 +561,7 @@ def build_bundle(in_path: Path, include_context: bool) -> Tuple[Path, Path, List
         for s in scripts:
             w.writerow([s.class_name, s.name, s.full_path, s.rel_file, s.source_len])
 
-    # 2.2: export attributes (CSV + TXT)
+    # ATTRIBUTES
     with safe_open_csv(bundle_dir / "ATTRIBUTES.csv") as f:
         w = csv.writer(f)
         w.writerow(["owner_class", "owner_name", "owner_path", "attr_name", "attr_type", "attr_value"])
@@ -469,7 +576,7 @@ def build_bundle(in_path: Path, include_context: bool) -> Tuple[Path, Path, List
     else:
         safe_write_text(bundle_dir / "ATTRIBUTES.txt", "# Attributes extracted\n\n(none)\n", encoding="utf-8")
 
-    # 2.3: CONTEXT detalhado
+    # CONTEXT
     if include_context:
         remotes = [c for c in contexts if c.details.get("kind") == "Remote"]
         bindables = [c for c in contexts if c.details.get("kind") == "Bindable"]
@@ -491,10 +598,7 @@ def build_bundle(in_path: Path, include_context: bool) -> Tuple[Path, Path, List
             lines += ["## ValueObjects", ""]
             for c in values:
                 iv = c.details.get("initial_value", "")
-                if iv != "":
-                    lines.append(f"- {c.full_path} ({c.class_name}) = {iv}")
-                else:
-                    lines.append(f"- {c.full_path} ({c.class_name})")
+                lines.append(f"- {c.full_path} ({c.class_name})" + (f" = {iv}" if iv != "" else ""))
             lines.append("")
         if others:
             lines += ["## Other context", ""]
@@ -506,84 +610,69 @@ def build_bundle(in_path: Path, include_context: bool) -> Tuple[Path, Path, List
 
     # ZIP
     zip_path = OUTPUT_DIR / f"{in_path.stem}_bundle.zip"
-    try:
-        if zip_path.exists():
-            zip_path.unlink()
-    except OSError as e:
-        raise RuntimeError(f"Falha ao remover ZIP existente '{zip_path}': {e}") from e
+    if zip_path.exists():
+        zip_path.unlink()
 
-    try:
-        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
-            for p in sorted((bundle_dir / "scripts").rglob("*")):
-                if p.is_file():
-                    z.write(p, arcname=str(p.relative_to(bundle_dir)))
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        # scripts/
+        for p in sorted((bundle_dir / "scripts").rglob("*")):
+            if p.is_file():
+                z.write(p, arcname=str(p.relative_to(bundle_dir)))
 
-            for fname in ["HIERARCHY.txt", "INDEX.csv", "ATTRIBUTES.csv", "ATTRIBUTES.txt"]:
-                p = bundle_dir / fname
-                if p.exists():
-                    z.write(p, arcname=p.name)
+        for fname in ["HIERARCHY.txt", "INDEX.csv", "ATTRIBUTES.csv", "ATTRIBUTES.txt"]:
+            p = bundle_dir / fname
+            if p.exists():
+                z.write(p, arcname=p.name)
 
-            if include_context:
-                p = bundle_dir / "CONTEXT.txt"
-                if p.exists():
-                    z.write(p, arcname=p.name)
-    except (OSError, zipfile.BadZipFile) as e:
-        raise RuntimeError(f"Falha ao criar ZIP '{zip_path}': {e}") from e
+        if include_context:
+            p = bundle_dir / "CONTEXT.txt"
+            if p.exists():
+                z.write(p, arcname=p.name)
 
     return bundle_dir, zip_path, scripts
 
 
-# ----------------- Main (UI) -----------------
+# ----------------- Main -----------------
 def main() -> None:
     setup_logging()
-
-    try:
-        ensure_dirs()
-    except Exception as e:
-        LOG.error("❌ Falhou: %s", e)
-        return
+    ensure_dirs()
 
     hr()
-    LOG.info("Roblox Bundle Extractor (bundle-only) ✅")
+    LOG.info("RBXBundle (RBXMX/RBXLX Extractor) ✅")
     hr()
-    LOG.info(" input/: %s", INPUT_DIR.resolve())
-    LOG.info(" output/: %s", OUTPUT_DIR.resolve())
+    LOG.info("input/:  %s", INPUT_DIR.resolve())
+    LOG.info("output/: %s", OUTPUT_DIR.resolve())
 
-    try:
-        files = list_candidates()
-    except Exception as e:
-        LOG.error("❌ Falhou: %s", e)
-        return
-
+    files = list_candidates()
     if not files:
-        LOG.info("Nenhum arquivo em input/. Coloque um .rbxmx/.xml/.txt lá e rode novamente.")
+        LOG.info("No files found in input/. Put a .rbxmx/.rbxlx/.xml there and run again.")
         return
 
     chosen = pick_file(files)
     if chosen is None:
         return
 
-    include_context = ask_yes_no("Incluir CONTEXT.txt (detalhado)?", default_yes=True)
+    include_context = ask_yes_no("Include CONTEXT.txt (remotes/values/folders)?", default_yes=True)
 
     try:
         bundle_dir, zip_path, scripts = build_bundle(chosen, include_context=include_context)
     except Exception as e:
-        LOG.error("❌ Falhou: %s", e)
+        LOG.error("❌ Failed: %s", e)
         return
 
     nonempty = sum(1 for s in scripts if s.source_len > 0)
     empty = len(scripts) - nonempty
 
     hr()
-    LOG.info("✅ Concluído!")
-    LOG.info("Arquivo: %s", chosen.name)
-    LOG.info("Scripts detectados: %d", len(scripts))
-    LOG.info(" - com Source não-vazio: %d", nonempty)
-    LOG.info(" - com Source vazio: %d (pode ser export do Studio / scripts vazios / protegidos)", empty)
+    LOG.info("✅ Done!")
+    LOG.info("File: %s", chosen.name)
+    LOG.info("Scripts found: %d", len(scripts))
+    LOG.info(" - non-empty Source: %d", nonempty)
+    LOG.info(" - empty Source: %d", empty)
     LOG.info("Bundle dir: %s", bundle_dir)
     LOG.info("ZIP: %s", zip_path)
     hr()
-    LOG.info("➡️ Envie o ZIP aqui no chat e diga: 'Analise o bundle'.")
+    LOG.info("Tip: send the ZIP to an AI assistant for full project context.")
 
 
 if __name__ == "__main__":
