@@ -266,6 +266,9 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
     # Dependency graph outputs
     # ----------------------------
 
+    nodes_json: List[dict] = []
+    edges_json: List[dict] = []
+
     try:
         dep_scripts = [
             ScriptInfo(
@@ -312,6 +315,21 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
             encoding="utf-8",
         )
 
+    # SUMMARY.md
+    try:
+        summary_md = generate_summary(
+            source_file=in_path.name,
+            scripts=scripts,
+            contexts=contexts,
+            attributes=attributes,
+            nodes_json=nodes_json,
+            edges_json=edges_json,
+            include_context=include_context,
+        )
+        safe_write_text(bundle_dir / "SUMMARY.md", summary_md, encoding="utf-8")
+    except Exception as e:
+        LOG.warning("SUMMARY.md generation failed: %s", e)
+
     # ZIP bundle
     zip_path = output_dir / f"{in_path.stem}_bundle.zip"
     if zip_path.exists():
@@ -323,6 +341,7 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
                 z.write(p, arcname=str(p.relative_to(bundle_dir)))
 
         for fname in [
+            "SUMMARY.md",
             "HIERARCHY.txt",
             "INDEX.csv",
             "ATTRIBUTES.csv",
@@ -341,3 +360,183 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
                 z.write(p, arcname=p.name)
 
     return bundle_dir, zip_path, scripts
+
+
+# ---------------------------------------------------------------------------
+# SUMMARY.md generator
+# ---------------------------------------------------------------------------
+
+def _confidence_label(conf: float) -> str:
+    if conf >= 0.9:
+        return "high"
+    if conf >= 0.6:
+        return "medium"
+    return "low"
+
+
+def _confidence_icon(conf: float) -> str:
+    if conf >= 0.9:
+        return "✅"
+    if conf >= 0.6:
+        return "⚠️"
+    return "❓"
+
+
+def generate_summary(
+    *,
+    source_file: str,
+    scripts: List[ScriptRecord],
+    contexts: List[ContextRecord],
+    attributes: List[AttributeRecord],
+    nodes_json: List[dict],
+    edges_json: List[dict],
+    include_context: bool,
+) -> str:
+    """Return the content of SUMMARY.md as a string."""
+
+    lines: List[str] = []
+
+    lines += [
+        "# RBXBundle — Project Summary",
+        "",
+        f"**Source file:** `{source_file}`  ",
+        f"**Scripts found:** {len(scripts)}  ",
+        "",
+        "---",
+        "",
+    ]
+
+    # --- Scripts section ---
+    lines += ["## Scripts", ""]
+
+    server_scripts = [s for s in scripts if s.class_name == "Script"]
+    local_scripts  = [s for s in scripts if s.class_name == "LocalScript"]
+    module_scripts = [s for s in scripts if s.class_name == "ModuleScript"]
+
+    if server_scripts:
+        lines += ["### Server Scripts", ""]
+        for s in server_scripts:
+            empty_tag = " *(empty)*" if s.source_len == 0 else ""
+            lines.append(f"- `{s.full_path}`{empty_tag}")
+        lines.append("")
+
+    if local_scripts:
+        lines += ["### Client Scripts", ""]
+        for s in local_scripts:
+            empty_tag = " *(empty)*" if s.source_len == 0 else ""
+            lines.append(f"- `{s.full_path}`{empty_tag}")
+        lines.append("")
+
+    if module_scripts:
+        lines += ["### Module Scripts", ""]
+        for s in module_scripts:
+            empty_tag = " *(empty)*" if s.source_len == 0 else ""
+            lines.append(f"- `{s.full_path}`{empty_tag}")
+        lines.append("")
+
+    if not scripts:
+        lines += ["*(no scripts found)*", ""]
+
+    lines += ["---", ""]
+
+    # --- Dependencies section ---
+    lines += ["## Dependency Graph", ""]
+
+    if not edges_json:
+        lines += ["*(no require() calls detected)*", ""]
+    else:
+        resolved   = [e for e in edges_json if e.get("to") is not None]
+        unresolved = [e for e in edges_json if e.get("to") is None]
+
+        if resolved:
+            lines += ["### Resolved", ""]
+            for e in resolved:
+                icon = _confidence_icon(e.get("confidence", 0.0))
+                conf_pct = int(e.get("confidence", 0.0) * 100)
+                kind = e.get("kind", "unknown")
+                loc  = e.get("loc") or {}
+                line_info = f" *(line {loc['line']})*" if loc.get("line") else ""
+                lines.append(
+                    f"- {icon} `{e['from']}` → `{e['to']}`  "
+                    f"[{kind}, confidence: {conf_pct}%]{line_info}"
+                )
+            lines.append("")
+
+        if unresolved:
+            lines += ["### Unresolved / Dynamic", ""]
+            for e in unresolved:
+                loc  = e.get("loc") or {}
+                line_info = f" *(line {loc['line']})*" if loc.get("line") else ""
+                lines.append(
+                    f"- ❓ `{e['from']}` → *(unresolved)*  "
+                    f"`{e.get('expr', '')}`{line_info}"
+                )
+            lines.append("")
+
+    lines += ["---", ""]
+
+    # --- Context section ---
+    if include_context and contexts:
+        lines += ["## Context Objects", ""]
+
+        remotes   = [c for c in contexts if c.details.get("kind") == "Remote"]
+        bindables = [c for c in contexts if c.details.get("kind") == "Bindable"]
+        values    = [c for c in contexts if c.details.get("kind") == "ValueObject"]
+        others    = [c for c in contexts if c.details.get("kind") not in {"Remote", "Bindable", "ValueObject"}]
+
+        if remotes:
+            lines += [f"**RemoteEvents / RemoteFunctions** ({len(remotes)})", ""]
+            for c in remotes:
+                lines.append(f"- `{c.full_path}` ({c.class_name})")
+            lines.append("")
+
+        if bindables:
+            lines += [f"**Bindables** ({len(bindables)})", ""]
+            for c in bindables:
+                lines.append(f"- `{c.full_path}` ({c.class_name})")
+            lines.append("")
+
+        if values:
+            lines += [f"**Value Objects** ({len(values)})", ""]
+            for c in values:
+                iv = c.details.get("initial_value", "")
+                val_str = f" = `{iv}`" if iv else ""
+                lines.append(f"- `{c.full_path}` ({c.class_name}){val_str}")
+            lines.append("")
+
+        if others:
+            lines += [f"**Other** ({len(others)})", ""]
+            for c in others:
+                lines.append(f"- `{c.full_path}` ({c.class_name})")
+            lines.append("")
+
+        lines += ["---", ""]
+
+    # --- Attributes section ---
+    if attributes:
+        lines += [f"## Attributes ({len(attributes)} total)", ""]
+        # group by owner
+        by_owner: dict = {}
+        for a in attributes:
+            by_owner.setdefault(a.owner_path, []).append(a)
+        for owner_path, attrs in by_owner.items():
+            lines.append(f"**`{owner_path}`**")
+            for a in attrs:
+                lines.append(f"  - `{a.attr_name}` [{a.attr_type}] = `{a.attr_value}`")
+        lines += ["", "---", ""]
+
+    # --- Footer ---
+    lines += [
+        "## How to use this bundle",
+        "",
+        "1. Upload the `.zip` file (or paste individual files) into your AI tool.",
+        "2. Reference specific scripts by their path shown above.",
+        "3. Use `HIERARCHY.txt` to understand instance structure.",
+        "4. Use `DEPENDENCIES.json` or `EDGES.csv` for script relationships.",
+        "5. Use `CONTEXT.txt` for RemoteEvent / ValueObject details.",
+        "",
+        "> *Generated by [rbxbundle](https://github.com/samuelffer/rbxbundle)*",
+        "",
+    ]
+
+    return "\n".join(lines)

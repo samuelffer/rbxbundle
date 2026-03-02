@@ -192,8 +192,8 @@ def find_require_calls(source: str) -> List[RequireCall]:
         if j < 0:
             break
 
-        # ensure it's an identifier boundary: not foo.requireX
-        if j > 0 and (masked[j - 1].isalnum() or masked[j - 1] == "_"):
+        # ensure it's an identifier boundary: not foo.requireX or foo:require
+        if j > 0 and (masked[j - 1].isalnum() or masked[j - 1] in ("_", ".", ":")):
             i = j + 7
             continue
 
