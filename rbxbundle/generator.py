@@ -273,6 +273,7 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
 
     nodes_json: List[dict] = []
     edges_json: List[dict] = []
+    dependency_analysis_failed = False
 
     try:
         dep_scripts = [
@@ -335,9 +336,9 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
             dep_error,
             encoding="utf-8",
         )
-        raise RuntimeError(
-            "Dependency extraction failed; see DEPENDENCIES_ERROR.txt for details."
-        ) from e
+        dependency_analysis_failed = True
+        nodes_json = []
+        edges_json = []
 
     # SUMMARY.md
     try:
@@ -349,6 +350,7 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
             nodes_json=nodes_json,
             edges_json=edges_json,
             include_context=include_context,
+            dependency_analysis_failed=dependency_analysis_failed,
         )
         safe_write_text(bundle_dir / "SUMMARY.md", summary_md, encoding="utf-8")
     except (KeyError, TypeError, ValueError) as e:
@@ -419,6 +421,7 @@ def generate_summary(
     nodes_json: List[dict],
     edges_json: List[dict],
     include_context: bool,
+    dependency_analysis_failed: bool = False,
 ) -> str:
     """Return the content of SUMMARY.md as a string."""
 
@@ -469,6 +472,9 @@ def generate_summary(
 
     # --- Dependencies section ---
     lines += ["## Dependency Graph", ""]
+
+    if dependency_analysis_failed:
+        lines += ["⚠️ Dependencies cannot be analised; See `DEPENDENCIES_ERROR.txt`.", ""]
 
     if not edges_json:
         lines += ["*(no require() calls detected)*", ""]

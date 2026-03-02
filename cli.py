@@ -1,17 +1,16 @@
-"""
-rbxbundle CLI
-=============
 
-Two modes, one entry point:
+# RBX Bundle CLI
+#Two modes, one entry point:
 
-  python cli.py              → launches the interactive TUI menu
-  python cli.py build ...    → runs the argparse command directly (no menus)
-  python cli.py inspect ...
-  python cli.py list ...
+#  python cli.py              → launches the interactive TUI menu
+#  python cli.py build ...    → runs the argparse command directly (no menus)
+#  python cli.py inspect ...
+#  python cli.py list ...
 
-The mode is chosen by whether the first argument is a known sub-command.
-If it is → argparse mode.  If not (or no args) → interactive mode.
-"""
+#The mode is chosen by whether the first argument is a known sub-command.
+#If it is → argparse mode.  If not (or no args) → interactive mode.
+
+#==========================================================================================================
 
 from __future__ import annotations
 
@@ -31,16 +30,16 @@ from rbxbundle.generator import (
     create_bundle,
 )
 from rbxbundle import __version__
-from rbxbundle.generator import CONTEXT_CLASSES, SCRIPT_CLASSES, create_bundle
 from rbxbundle.parser import iter_top_level_items
 from rbxbundle.utils import (
     ensure_dirs,
+    local_tag,
     read_text,
     setup_logging,
     strip_junk_before_roblox,
 )
 
-# ─── Constants ───────────────────────────────────────────────────────────────
+# ===== Constants ==========================================================
 
 SUPPORTED_EXTS    = {".rbxmx", ".rbxlx", ".xml", ".txt"}
 DEFAULT_INPUT_DIR  = Path("input")
@@ -50,7 +49,7 @@ LOG = logging.getLogger("rbxbundle")
 # Sub-commands that trigger argparse mode
 _ARGPARSE_COMMANDS = {"build", "inspect", "list", "help", "--help", "-h"}
 
-# ─── Terminal helpers ─────────────────────────────────────────────────────────
+# ===== Terminal helpers ===================================================
 
 def _term_width() -> int:
     return shutil.get_terminal_size((80, 24)).columns
@@ -65,7 +64,7 @@ def _supports_color() -> bool:
         )
     return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 
-# ANSI codes – fallback to empty strings if no color support
+# ANSI codes: fallback to empty strings if no color support
 if _supports_color():
     R  = "\033[0m"        # reset
     B  = "\033[1m"        # bold
@@ -146,7 +145,7 @@ def _pick_number(prompt: str, lo: int, hi: int) -> int | None:
                 return n
         _err(f"Enter a number between {lo} and {hi} (or 0 to go back).")
 
-# ─── Shared logic (used by both modes) ───────────────────────────────────────
+# ==== Shared logic (used by both modes) =======================================
 
 def _scan_files(directory: Path) -> list[Path]:
     if not directory.exists():
@@ -173,7 +172,7 @@ def _inspect_file(in_path: Path) -> dict:
         if cls in CONTEXT_CLASSES:
             context_count += 1
         for child in item:
-            if child.tag.split("}")[-1] == "Item":
+            if local_tag(child.tag) == "Item":
                 walk(child)
 
     for it in top_items:
@@ -202,9 +201,9 @@ def _run_build(
     return bundle_dir, zip_path, scripts, None   # err=None means success
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  INTERACTIVE MODE
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def _imode_main_menu() -> None:
     """Top-level interactive menu loop."""
@@ -242,7 +241,7 @@ def _imode_main_menu() -> None:
             input()
 
 
-# ─── interactive: BUILD ───────────────────────────────────────────────────────
+# === interactive: BUILD ============================================
 
 def _imode_build() -> None:
     _clear()
@@ -270,7 +269,7 @@ def _imode_build() -> None:
 
     chosen = files[idx - 1]
 
-    # ── Options ──
+    # === Options ===
     _clear()
     _banner()
     _section(f"Build — Options for  {clr(YLW, chosen.name)}")
@@ -292,7 +291,7 @@ def _imode_build() -> None:
     include_context = _yn("Include CONTEXT.txt? (RemoteEvents, ValueObjects…)", default_yes=True)
     out_dir = DEFAULT_OUTPUT_DIR
 
-    # ── Build ──
+    # === Build ===
     _clear()
     _banner()
     _section("Building…")
@@ -328,7 +327,7 @@ def _imode_build() -> None:
     _prompt("Press Enter to return to the main menu.")
 
 
-# ─── interactive: INSPECT ─────────────────────────────────────────────────────
+# === interactive: INSPECT ===================================================
 
 def _imode_inspect() -> None:
     _clear()
@@ -376,7 +375,7 @@ def _imode_inspect() -> None:
     _prompt("Press Enter to go back.")
 
 
-# ─── interactive: LIST ────────────────────────────────────────────────────────
+# === interactive: LIST =======================================================
 
 def _imode_list() -> None:
     _clear()
@@ -402,7 +401,7 @@ def _imode_list() -> None:
     _prompt("Press Enter to go back.")
 
 
-# ─── interactive: SETTINGS ───────────────────────────────────────────────────
+# === interactive: SETTINGS =================================================
 
 def _imode_settings() -> None:
     global DEFAULT_INPUT_DIR, DEFAULT_OUTPUT_DIR
@@ -442,9 +441,9 @@ def _imode_settings() -> None:
             input()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ================================================================
 #  ARGPARSE MODE
-# ══════════════════════════════════════════════════════════════════════════════
+# ================================================================
 
 def cmd_build(args: argparse.Namespace) -> int:
     in_path = Path(args.file)
@@ -567,7 +566,7 @@ def _build_argparser() -> argparse.ArgumentParser:
 
     # build
     pb = sub.add_parser("build", help="Generate a bundle from a Roblox file.")
-    pb.add_argument("file", help=".rbxmx / .rbxlx / .xml file to process.")
+    pb.add_argument("file", help=".rbxmx / .rbxlx / .xml / .txt file to process.")
     pb.add_argument("--output", "-o", default=str(DEFAULT_OUTPUT_DIR),
                     metavar="DIR", help=f"Output directory (default: {DEFAULT_OUTPUT_DIR}).")
     pb.add_argument("--no-context", action="store_true",
@@ -575,7 +574,7 @@ def _build_argparser() -> argparse.ArgumentParser:
 
     # inspect
     pi = sub.add_parser("inspect", help="Show stats for a file without building.")
-    pi.add_argument("file", help=".rbxmx / .rbxlx / .xml file to inspect.")
+    pi.add_argument("file", help=".rbxmx / .rbxlx / .xml / .txt file to inspect.")
 
     # list
     pl = sub.add_parser("list", help="List supported files in a directory.")
@@ -585,9 +584,9 @@ def _build_argparser() -> argparse.ArgumentParser:
     return parser
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==================================================
 #  ENTRY POINT — mode router
-# ══════════════════════════════════════════════════════════════════════════════
+# ==================================================
 
 def main() -> None:
     # Decide mode BEFORE argparse sees argv, so argparse never interferes
@@ -598,7 +597,7 @@ def main() -> None:
     use_argparse = first in _ARGPARSE_COMMANDS
 
     if use_argparse:
-        # ── Argparse mode ─────────────────────────────────────────────────
+        # === Argparse mode ===============================
         parser = _build_argparser()
         args   = parser.parse_args()
         level  = logging.DEBUG if args.verbose else logging.INFO
@@ -616,7 +615,7 @@ def main() -> None:
         sys.exit(handler(args))
 
     else:
-        # ── Interactive mode ───────────────────────────────────────────────
+        # === Interactive mode ==============================
         setup_logging(logging.WARNING)   # suppress INFO noise in TUI
         _imode_main_menu()
 
