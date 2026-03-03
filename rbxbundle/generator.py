@@ -70,6 +70,33 @@ PRIMARY_CLIENT_PREFIXES = (
     "StarterPack/",
 )
 
+MIN_HIERARCHY_CLASSES = {
+    "RemoteEvent",
+    "RemoteFunction",
+    "BindableEvent",
+    "BindableFunction",
+    "StringValue",
+    "NumberValue",
+    "BoolValue",
+    "IntValue",
+    "ObjectValue",
+    "Configuration",
+    "Animation",
+}
+
+MIN_HIERARCHY_FOLDER_NAMES = {
+    "config",
+    "configs",
+    "configuration",
+    "configurations",
+    "settings",
+    "setting",
+    "remotes",
+    "remote",
+    "bindables",
+    "bindable",
+}
+
 SEVERITY_ORDER = {
     "ERROR": 0,
     "WARN": 1,
@@ -187,6 +214,20 @@ def _script_flags(record: ScriptRecord) -> str:
 
 def _is_runtime_script(record: ScriptRecord) -> bool:
     return record.class_name in {"Script", "LocalScript"}
+
+
+def _is_relevant_min_item(class_name: str, name: str) -> bool:
+    if class_name in SCRIPT_CLASSES:
+        return True
+    if class_name in MIN_HIERARCHY_CLASSES:
+        return True
+    if class_name == "Folder" and name.strip().lower() in MIN_HIERARCHY_FOLDER_NAMES:
+        return True
+    return False
+
+
+def _build_hierarchy_min_lines(items: List[Tuple[str, str]]) -> List[str]:
+    return [f"{full_path} ({class_name})" for full_path, class_name in items]
 
 
 def _is_expected_client_path(path: str) -> bool:
@@ -342,6 +383,7 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
     contexts: List[ContextRecord] = []
     attributes: List[AttributeRecord] = []
     hierarchy_lines: List[str] = []
+    hierarchy_min_items: List[Tuple[str, str]] = []
 
     nodes: Dict[str, Node] = {}
     script_sources: Dict[str, str] = {}
@@ -369,6 +411,8 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
         )
 
         hierarchy_lines.append(f"{' ' * depth}- {safe_name} ({class_name})")
+        if _is_relevant_min_item(class_name, name):
+            hierarchy_min_items.append((full_path, class_name))
 
         for aname, atype, aval in parse_attributes(
             props,
@@ -444,6 +488,11 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
         walk(it, "", 0)
 
     safe_write_text(bundle_dir / "HIERARCHY.txt", "\n".join(hierarchy_lines), encoding="utf-8")
+    safe_write_text(
+        bundle_dir / "HIERARCHY_MIN.txt",
+        "\n".join(_build_hierarchy_min_lines(hierarchy_min_items)),
+        encoding="utf-8",
+    )
 
     with safe_open_csv(bundle_dir / "INDEX.csv") as f:
         w = csv.writer(f)
@@ -629,6 +678,7 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
         for fname in [
             "SUMMARY.md",
             "HIERARCHY.txt",
+            "HIERARCHY_MIN.txt",
             "INDEX.csv",
             "ATTRIBUTES.csv",
             "ATTRIBUTES.txt",
@@ -907,7 +957,7 @@ def generate_summary(
         "",
         "1. Upload the `.zip` file (or paste individual files) into your AI tool.",
         "2. Reference specific scripts by their path shown above.",
-        "3. Use `HIERARCHY.txt` to understand instance structure.",
+        "3. Use `HIERARCHY_MIN.txt` for a low-token view and `HIERARCHY.txt` for the full structure.",
         "4. Use `WARNINGS.txt` to spot likely execution or placement issues.",
         "5. Use `DEPENDENCIES.json` or `EDGES.csv` for script relationships.",
         "6. Use `CONTEXT.txt` for RemoteEvent / ValueObject details.",
