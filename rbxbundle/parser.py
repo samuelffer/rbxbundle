@@ -46,6 +46,20 @@ def get_value(props: Optional[ET.Element]) -> Optional[str]:
             return (p.text or "").strip()
     return None
 
+def get_bool(props: Optional[ET.Element], prop_name: str) -> Optional[bool]:
+    if props is None:
+        return None
+    for p in props:
+        if p.attrib.get("name") != prop_name:
+            continue
+        text = (p.text or "").strip().lower()
+        if text in {"true", "1"}:
+            return True
+        if text in {"false", "0"}:
+            return False
+        return None
+    return None
+
 def get_token(props: Optional[ET.Element], token_name: str) -> Optional[int]:
     if props is None:
         return None
@@ -63,6 +77,10 @@ def get_token(props: Optional[ET.Element], token_name: str) -> Optional[int]:
 
 def get_run_context(props: Optional[ET.Element]) -> Optional[int]:
     return get_token(props, "RunContext")
+
+def get_disabled(props: Optional[ET.Element]) -> bool:
+    value = get_bool(props, "Disabled")
+    return value if value is not None else False
 
 def get_run_context_name(value: Optional[int]) -> str:
     if value is None:

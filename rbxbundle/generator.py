@@ -15,6 +15,7 @@ from .parser import (
     get_name,
     get_properties_node,
     get_run_context,
+    get_disabled,
     get_run_context_name,
     get_source,
     get_value,
@@ -121,6 +122,7 @@ def _exec_side_for_script(class_name: str, run_context_value: int | None) -> str
     if normalized_value == RUN_CONTEXT_PLUGIN:
         return "plugin"
     if normalized_value == RUN_CONTEXT_LEGACY:
+    disabled: bool = False
         if class_name == "LocalScript":
             return "client"
         if class_name == "Script":
@@ -200,6 +202,10 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
         name = get_name(props) or (referent or "Unnamed")
 
         base_safe = sanitize_filename(name)
+def _format_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
         used = used_names_by_parent.setdefault(parent_path, {})
         safe_name = _unique_child_name(used, base_safe, referent)
 
@@ -258,7 +264,8 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
                 f"-- Name: {name}\n"
                 f"-- Path: {full_path}\n"
                 f"-- RunContext: {_header_run_context(run_context_name, run_context_value)}\n"
-                f"-- ExecSide: {exec_side}\n\n"
+                f"-- ExecSide: {exec_side}\n"
+                f"-- Disabled: {_format_bool(disabled)}\n\n"
             )
 
             safe_write_text(out_file, header + src, encoding="utf-8")
@@ -475,6 +482,7 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
             p = bundle_dir / fname
             if p.exists():
                 z.write(p, arcname=p.name)
+            disabled = get_disabled(props)
 
         if include_context:
             p = bundle_dir / "CONTEXT.txt"
@@ -503,6 +511,7 @@ def _confidence_icon(conf: float) -> str:
 def generate_summary(
     *,
     source_file: str,
+                    disabled=disabled,
     scripts: List[ScriptRecord],
     contexts: List[ContextRecord],
     attributes: List[AttributeRecord],
@@ -533,6 +542,7 @@ def generate_summary(
     if plugin_scripts:
         lines.append(f"**Plugin Scripts:** {len(plugin_scripts)}  ")
     if unknown_scripts:
+            "disabled",
         lines.append(f"**Unknown Scripts:** {len(unknown_scripts)}  ")
 
     lines += [
@@ -544,6 +554,7 @@ def generate_summary(
     lines += ["## Scripts", ""]
 
     if server_scripts:
+                _format_bool(s.disabled),
         lines += ["### Server Scripts", ""]
         for s in server_scripts:
             empty_tag = " *(empty)*" if s.source_len == 0 else ""
@@ -616,6 +627,7 @@ def generate_summary(
                 lines.append(
                     f"- ? `{e['from']}` -> *(unresolved)*  "
                     f"`{e.get('expr', '')}`{line_info}"
+            node["disabled"] = script_meta.disabled
                 )
             lines.append("")
 

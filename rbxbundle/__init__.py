@@ -6,6 +6,8 @@ __license__ = "MIT"
 
 from .generator import create_bundle, generate_summary, ScriptRecord, ContextRecord, AttributeRecord
 from .parser import (
+    get_bool,
+    get_disabled,
     get_name,
     get_properties_node,
     get_run_context,
@@ -40,6 +42,8 @@ __all__ = [
     "ContextRecord",
     "AttributeRecord",
     # Parser
+    "get_bool",
+    "get_disabled",
     "get_name",
     "get_properties_node",
     "get_run_context",
