@@ -10,7 +10,10 @@ readme = "README.md"
 requires-python = ">=3.9"
 
 [project.scripts]
-rbxbundle = "cli:main"
+rbxbundle = "rbxbundle._cli:main"
+
+[tool.setuptools]
+packages = ["rbxbundle"]
 
 [tool.setuptools.dynamic]
 version = {attr = "rbxbundle.__version__"}
