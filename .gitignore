@@ -180,6 +180,8 @@ output/
 *.rbxl
 *.rbxlx
 *.zip
+build_version_info.txt
+
 
 # rbxbundle user config (generated at runtime, not part of the project)
 rbxbundle/rbxbundle.json
