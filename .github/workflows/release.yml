@@ -9,8 +9,19 @@ permissions:
   contents: write
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_os: windows
+            exe_name: rbxbundle.exe
+          - os: ubuntu-latest
+            artifact_os: linux
+            exe_name: rbxbundle
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -21,17 +32,99 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Extract version (Windows)
+        if: runner.os == 'Windows'
+        id: ver_win
+        shell: pwsh
+        run: |
+          $content = Get-Content "rbxbundle/__init__.py" -Raw
+          if ($content -match "__version__\s*=\s*['""]([^'""]+)['""]") {
+            "version=$($Matches[1])" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            "version=0.0.0" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
+      - name: Extract version (Linux)
+        if: runner.os != 'Windows'
+        id: ver_nix
+        shell: bash
+        run: |
+          ver=$(python -c "import re, pathlib; t=pathlib.Path('rbxbundle/__init__.py').read_text(encoding='utf-8'); m=re.search(r\"__version__\\s*=\\s*['\\\"]([^'\\\"]+)['\\\"]\", t); print(m.group(1) if m else '0.0.0')")
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Set VERSION env
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            echo "VERSION=${{ steps.ver_win.outputs.version }}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=${{ steps.ver_nix.outputs.version }}" >> "$GITHUB_ENV"
+          fi
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
           pip install .
 
-      - name: Build exe
+      - name: Build onefile (Windows)
+        if: runner.os == 'Windows'
         run: |
-          pyinstaller --onefile --name rbxbundle rbxbundle/__main__.py
+          pyinstaller --onefile --clean --name rbxbundle --icon assets/rbxbundle.ico rbxbundle/__main__.py
 
-      - name: Upload exe to GitHub Release
+      - name: Build onefile (Linux)
+        if: runner.os != 'Windows'
+        run: |
+          pyinstaller --onefile --clean --name rbxbundle rbxbundle/__main__.py
+
+      - name: Stage release (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $stage = "stage/rbxbundle-v$env:VERSION-${{ matrix.artifact_os }}"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          Copy-Item "dist\rbxbundle.exe" "$stage\rbxbundle.exe" -Force
+
+          if (Test-Path "README.md") { Copy-Item "README.md" "$stage\README.md" -Force }
+          if (Test-Path "LICENSE") { Copy-Item "LICENSE" "$stage\LICENSE" -Force }
+          if (Test-Path "CHANGELOG.md") { Copy-Item "CHANGELOG.md" "$stage\CHANGELOG.md" -Force }
+
+          New-Item -ItemType Directory -Force -Path "$stage\input" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$stage\output" | Out-Null
+
+          $zip = "rbxbundle-v$env:VERSION-${{ matrix.artifact_os }}.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "$stage\*" -DestinationPath $zip
+
+          certutil -hashfile $zip SHA256 | Out-File -Encoding ascii "sha256-${{ matrix.artifact_os }}.txt"
+
+      - name: Stage release (Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          stage="stage/rbxbundle-v${VERSION}-${{ matrix.artifact_os }}"
+          mkdir -p "$stage"
+
+          cp "dist/rbxbundle" "$stage/rbxbundle"
+          chmod +x "$stage/rbxbundle"
+
+          [ -f README.md ] && cp README.md "$stage/README.md"
+          [ -f LICENSE ] && cp LICENSE "$stage/LICENSE"
+          [ -f CHANGELOG.md ] && cp CHANGELOG.md "$stage/CHANGELOG.md"
+
+          mkdir -p "$stage/input" "$stage/output"
+
+          zip_name="rbxbundle-v${VERSION}-${{ matrix.artifact_os }}.zip"
+          rm -f "$zip_name"
+          (cd "stage" && zip -r "../$zip_name" "rbxbundle-v${VERSION}-${{ matrix.artifact_os }}")
+
+          sha256sum "$zip_name" > "sha256-${{ matrix.artifact_os }}.txt"
+
+      - name: Upload artifacts to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/rbxbundle.exe
+          files: |
+            rbxbundle-v${{ env.VERSION }}-${{ matrix.artifact_os }}.zip
+            sha256-${{ matrix.artifact_os }}.txt
+          generate_release_notes: true
