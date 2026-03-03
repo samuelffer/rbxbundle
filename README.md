@@ -49,6 +49,12 @@ rbxbundle --version
 
 ## Quick start
 
+Open the interactive mode:
+
+```bash
+rbxbundle
+```
+
 Build a bundle:
 
 ```bash
@@ -67,22 +73,19 @@ List supported files in a directory:
 rbxbundle list --dir ./models
 ```
 
-Run interactive mode:
-
-```bash
-rbxbundle
-```
-
 ## Main commands
 
 ```text
+rbxbundle
 rbxbundle build <file> [--output DIR] [--no-context]
 rbxbundle inspect <file>
 rbxbundle list [--dir DIR]
-rbxbundle --mode interactive
-rbxbundle --mode argparse
 rbxbundle --version
 ```
+
+Notes:
+- Running `rbxbundle` with no arguments opens the interactive mode.
+- Use `build`, `inspect`, `list`, `--help`, or `--version` from a terminal for command-line usage.
 
 Supported input extensions:
 - `.rbxmx`

@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.3] - 2026-03-03
+
+### Fixed
+- Fixed packaged `.exe` startup so opening it without arguments no longer exits immediately.
+
+### Changed
+- Simplified startup behavior: launching without arguments now always opens interactive mode.
+- Removed the startup mode toggle from settings and CLI help text.
+
 ## [0.5.2] - 2026-03-03
 
 ### Fixed

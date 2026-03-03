@@ -16,7 +16,6 @@ class TestCliConfigDefaults(unittest.TestCase):
 
     def test_apply_config_defaults_updates_argparse_defaults(self):
         cfg = {
-            "startup_mode": "interactive",
             "input_dir": "custom-input",
             "output_dir": "custom-output",
         }
@@ -39,3 +38,14 @@ class TestCliTextHelpers(unittest.TestCase):
     def test_helpers_use_ascii_markers(self):
         self.assertEqual(_cli.clr("", "[OK]"), "[OK]")
         self.assertEqual(_cli.clr("", "->"), "->")
+
+
+class TestCliModeRouting(unittest.TestCase):
+    def test_no_args_stays_interactive(self):
+        self.assertFalse(_cli._should_use_argparse([]))
+
+    def test_explicit_subcommand_uses_argparse(self):
+        self.assertTrue(_cli._should_use_argparse(["build"]))
+
+    def test_help_flag_uses_argparse(self):
+        self.assertTrue(_cli._should_use_argparse(["--help"]))

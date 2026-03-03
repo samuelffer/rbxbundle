@@ -46,7 +46,6 @@ def _resolve_config_path() -> Path:
 
 _CONFIG_PATH = _resolve_config_path()
 _DEFAULT_CONFIG: dict = {
-    "startup_mode": "interactive",
     "input_dir": str(DEFAULT_INPUT_DIR),
     "output_dir": str(DEFAULT_OUTPUT_DIR),
 }
@@ -266,8 +265,8 @@ def _imode_main_menu() -> None:
         print(f"  {clr(B + GRN, '[1]')}  {clr(WHT, 'Build')}         {clr(GRY, '- process a file and generate the bundle')}")
         print(f"  {clr(B + BLU, '[2]')}  {clr(WHT, 'Inspect')}       {clr(GRY, '- peek inside a file without building')}")
         print(f"  {clr(B + YLW, '[3]')}  {clr(WHT, 'List files')}    {clr(GRY, '- show available files in input/')}")
-        print(f"  {clr(B + PRP, '[4]')}  {clr(WHT, 'Settings')}      {clr(GRY, '- directories, startup mode, and more')}")
-        print(f"  {clr(B + CYN, '[H]')}  {clr(WHT, 'Help')}          {clr(GRY, '- usage reference for CLI / argparse mode')}")
+        print(f"  {clr(B + PRP, '[4]')}  {clr(WHT, 'Settings')}      {clr(GRY, '- input/output directories')}")
+        print(f"  {clr(B + CYN, '[H]')}  {clr(WHT, 'Help')}          {clr(GRY, '- usage reference for command-line mode')}")
         print(f"  {clr(B + GRY, '[0]')}  {clr(GRY, 'Exit')}")
         print()
 
@@ -296,10 +295,10 @@ def _imode_main_menu() -> None:
 def _imode_help() -> None:
     _clear()
     _banner()
-    _section("CLI / Argparse Reference")
+    _section("Command-line Reference")
     print()
-    print(f"  {clr(GRY, 'When you pass arguments directly, rbxbundle runs in argparse mode')}")
-    print(f"  {clr(GRY, 'and skips the interactive menus entirely.')}")
+    print(f"  {clr(GRY, 'Opening rbxbundle with no arguments starts the interactive mode.')}")
+    print(f"  {clr(GRY, 'Passing commands directly runs the command-line interface instead.')}")
     print()
 
     rows = [
@@ -503,27 +502,17 @@ def _imode_settings(cfg: dict) -> dict:
         _clear()
         _banner()
         _section("Settings")
-
-        mode_label = clr(GRN, "interactive") if cfg["startup_mode"] == "interactive" else clr(YLW, "argparse (CLI)")
-        _info(f"Startup mode  {mode_label}")
         _info(f"Input  dir    {clr(WHT, str(Path(cfg['input_dir']).resolve()))}")
         _info(f"Output dir    {clr(WHT, str(Path(cfg['output_dir']).resolve()))}")
         _info(f"Config file   {clr(WHT, str(_CONFIG_PATH))}")
         print()
-        print(f"  {clr(B + CYN, '[1]')}  Toggle startup mode  {clr(GRY, '- interactive <-> argparse')}")
-        print(f"  {clr(B + YLW, '[2]')}  Change input directory")
-        print(f"  {clr(B + YLW, '[3]')}  Change output directory")
+        print(f"  {clr(B + YLW, '[1]')}  Change input directory")
+        print(f"  {clr(B + YLW, '[2]')}  Change output directory")
         print(f"  {clr(B + GRY, '[0]')}  Back")
 
         choice = _prompt("Choose:")
 
         if choice == "1":
-            cfg["startup_mode"] = "argparse" if cfg["startup_mode"] == "interactive" else "interactive"
-            _save_config(cfg)
-            new_label = clr(GRN, "interactive") if cfg["startup_mode"] == "interactive" else clr(YLW, "argparse")
-            _ok(f"Startup mode set to {new_label}")
-            input("  Press Enter to continue.")
-        elif choice == "2":
             raw = _prompt("New input directory path:")
             if raw:
                 p = Path(raw)
@@ -533,7 +522,7 @@ def _imode_settings(cfg: dict) -> dict:
                 _save_config(cfg)
                 _ok(f"Input directory set to {p.resolve()}")
                 input("  Press Enter to continue.")
-        elif choice == "3":
+        elif choice == "2":
             raw = _prompt("New output directory path:")
             if raw:
                 p = Path(raw)
@@ -659,17 +648,10 @@ def _build_argparser() -> argparse.ArgumentParser:
               rbxbundle inspect MyModel.rbxmx
               rbxbundle list
               rbxbundle list --dir ./models
-              rbxbundle --mode interactive
               rbxbundle --version
         """),
     )
 
-    parser.add_argument(
-        "--mode",
-        choices=["interactive", "argparse"],
-        metavar="MODE",
-        help="Set and save the default startup mode  (interactive | argparse).",
-    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--verbose", "-v", action="store_true", help=argparse.SUPPRESS)
 
@@ -701,35 +683,19 @@ def _build_argparser() -> argparse.ArgumentParser:
     return parser
 
 
+def _should_use_argparse(args_passed: list[str]) -> bool:
+    """Return True only for explicit CLI-style invocations."""
+    if not args_passed:
+        return False
+    return args_passed[0] in _ARGPARSE_COMMANDS
+
+
 def main() -> None:
     cfg = _load_config()
     _apply_config_defaults(cfg)
 
     args_passed = sys.argv[1:]
-    first = args_passed[0] if args_passed else ""
-
-    if "--mode" in args_passed:
-        parser = _build_argparser()
-        args = parser.parse_args()
-        if args.mode:
-            cfg["startup_mode"] = args.mode
-            _save_config(cfg)
-            label = clr(GRN, "interactive") if args.mode == "interactive" else clr(YLW, "argparse")
-            print(f"\n  {clr(GRN, '[OK]')}  startup mode set to {label}")
-            print(f"  {clr(GRY, f'saved to {_CONFIG_PATH}')}\n")
-            if not args.command:
-                sys.exit(0)
-            level = logging.DEBUG if getattr(args, "verbose", False) else logging.WARNING
-            setup_logging(level)
-            dispatch = {"build": cmd_build, "inspect": cmd_inspect, "list": cmd_list}
-            handler = dispatch.get(args.command)
-            if handler:
-                sys.exit(handler(args))
-            sys.exit(0)
-
-    use_argparse = first in _ARGPARSE_COMMANDS or (
-        not args_passed and cfg["startup_mode"] == "argparse"
-    )
+    use_argparse = _should_use_argparse(args_passed)
 
     if use_argparse:
         parser = _build_argparser()
