@@ -486,7 +486,7 @@ def generate_summary(
     lines += ["## Dependency Graph", ""]
 
     if dependency_analysis_failed:
-        lines += ["⚠️ Dependencies cannot be analised; See `DEPENDENCIES_ERROR.txt`.", ""]
+        lines += ["⚠️ Dependencies could not be analyzed; see `DEPENDENCIES_ERROR.txt`.", ""]
 
     if not edges_json:
         lines += ["*(no require() calls detected)*", ""]
