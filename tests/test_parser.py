@@ -12,7 +12,10 @@ from rbxbundle.parser import (
     decode_attributes_serialize,
     get_name,
     get_properties_node,
+    get_run_context,
+    get_run_context_name,
     get_source,
+    get_token,
     get_value,
     iter_top_level_items,
     parse_attributes,
@@ -24,7 +27,13 @@ from rbxbundle.utils import local_tag
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_item(class_name: str, name: str, source: str = "", value: str | None = None) -> ET.Element:
+def make_item(
+    class_name: str,
+    name: str,
+    source: str = "",
+    value: str | None = None,
+    run_context: int | None = None,
+) -> ET.Element:
     item = ET.Element("Item", attrib={"class": class_name})
     props = ET.SubElement(item, "Properties")
     n = ET.SubElement(props, "string", attrib={"name": "Name"})
@@ -35,6 +44,9 @@ def make_item(class_name: str, name: str, source: str = "", value: str | None = 
     if value is not None:
         v = ET.SubElement(props, "string", attrib={"name": "Value"})
         v.text = value
+    if run_context is not None:
+        token = ET.SubElement(props, "token", attrib={"name": "RunContext"})
+        token.text = str(run_context)
     return item
 
 
@@ -137,6 +149,35 @@ class TestGetValue(unittest.TestCase):
         item = make_item("Folder", "F")
         props = get_properties_node(item)
         self.assertIsNone(get_value(props))
+
+
+# ---------------------------------------------------------------------------
+# get_token / get_run_context
+# ---------------------------------------------------------------------------
+
+class TestGetToken(unittest.TestCase):
+    def test_reads_named_token(self):
+        item = make_item("Script", "S", run_context=2)
+        props = get_properties_node(item)
+        self.assertEqual(get_token(props, "RunContext"), 2)
+
+    def test_returns_none_for_invalid_token_value(self):
+        item = ET.Element("Item", attrib={"class": "Script"})
+        props = ET.SubElement(item, "Properties")
+        token = ET.SubElement(props, "token", attrib={"name": "RunContext"})
+        token.text = "abc"
+        self.assertIsNone(get_token(props, "RunContext"))
+
+
+class TestGetRunContext(unittest.TestCase):
+    def test_reads_run_context_token(self):
+        item = make_item("Script", "S", run_context=2)
+        props = get_properties_node(item)
+        self.assertEqual(get_run_context(props), 2)
+        self.assertEqual(get_run_context_name(2), "Client")
+
+    def test_returns_unknown_name_for_missing_value(self):
+        self.assertEqual(get_run_context_name(None), "Unknown")
 
 
 # ---------------------------------------------------------------------------
