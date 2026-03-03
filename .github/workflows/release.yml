@@ -67,8 +67,13 @@ jobs:
           pip install pyinstaller
           pip install .
 
-      - name: Build onefile
-        shell: bash
+      - name: Build onefile (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller --onefile --clean --name rbxbundle --icon assets/rbxbundle.ico rbxbundle/__main__.py
+
+      - name: Build onefile (Linux)
+        if: runner.os != 'Windows'
         run: |
           pyinstaller --onefile --clean --name rbxbundle rbxbundle/__main__.py
 
