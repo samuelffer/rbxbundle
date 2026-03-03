@@ -1,10 +1,19 @@
 from __future__ import annotations
 
-__version__ = "0.5.6"
+__version__ = "0.5.7"
 __author__ = "samuelffer"
 __license__ = "MIT"
 
-from .generator import create_bundle, generate_summary, ScriptRecord, ContextRecord, AttributeRecord
+from .generator import (
+    AttributeRecord,
+    BundleRules,
+    ContextRecord,
+    DEFAULT_BUNDLE_RULES,
+    ScriptRecord,
+    create_bundle,
+    generate_summary,
+    resolve_bundle_rules,
+)
 from .parser import (
     get_bool,
     get_disabled,
@@ -41,6 +50,8 @@ __all__ = [
     "ScriptRecord",
     "ContextRecord",
     "AttributeRecord",
+    "BundleRules",
+    "DEFAULT_BUNDLE_RULES",
     # Parser
     "get_bool",
     "get_disabled",
@@ -59,6 +70,7 @@ __all__ = [
     "Node",
     "ScriptInfo",
     "RequireEdge",
+    "resolve_bundle_rules",
     # Utils
     "read_text",
     "safe_write_text",

@@ -97,13 +97,41 @@ rbxbundle
 rbxbundle build <file> [--output DIR] [--no-context]
 rbxbundle inspect <file>
 rbxbundle list [--dir DIR]
+rbxbundle config validate [FILE]
 rbxbundle --version
 ```
 
 Notes:
 - Running `rbxbundle` with no arguments opens the interactive mode.
-- Use `build`, `inspect`, `list`, `--help`, or `--version` from a terminal for command-line usage.
+- Use `build`, `inspect`, `list`, `config validate`, `--help`, or `--version` from a terminal for command-line usage.
 - If you type an invalid command, `rbxbundle` now returns a command-line error instead of falling back to interactive mode.
+
+Project-level overrides:
+- Place `rbxbundle.json` or `.rbxbundle.json` in your project folder to override Roblox-specific bundle rules without editing Python code.
+- `rbxbundle.json` now uses a versioned schema. Current supported value: `"schema_version": 1`.
+- Files without `schema_version` are still accepted as legacy v1 configs for backward compatibility.
+- Supported `roblox_rules` keys are `context_classes`, `value_object_classes`, `server_only_prefixes`, `client_only_prefixes`, `primary_client_prefixes`, `min_hierarchy_classes`, and `min_hierarchy_folder_names`.
+
+Example:
+
+```json
+{
+  "schema_version": 1,
+  "roblox_rules": {
+    "server_only_prefixes": ["ServerRuntime/"],
+    "client_only_prefixes": ["ClientRuntime/"],
+    "primary_client_prefixes": ["ClientRuntime/"],
+    "context_classes": ["RemoteEvent", "RemoteFunction", "Configuration"]
+  }
+}
+```
+
+Validate a config file before building:
+
+```bash
+rbxbundle config validate
+rbxbundle config validate ./rbxbundle.json
+```
 
 Supported input extensions:
 - `.rbxmx`
@@ -145,6 +173,10 @@ bundle_dir, zip_path, scripts = create_bundle(
     Path("MyModel.rbxmx"),
     output_dir=Path("output"),
     include_context=True,
+    rules={
+        "server_only_prefixes": ["ServerRuntime/"],
+        "client_only_prefixes": ["ClientRuntime/"],
+    },
 )
 ```
 
@@ -153,6 +185,8 @@ bundle_dir, zip_path, scripts = create_bundle(
 ```bash
 python -m unittest discover tests -v
 ```
+
+CI also validates packaging by running `pip install .` and a smoke test against the installed `rbxbundle` CLI on `push` and `pull_request`.
 
 ## License
 

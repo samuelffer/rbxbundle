@@ -13,10 +13,10 @@ from pathlib import Path
 
 from rbxbundle import __version__
 from rbxbundle.generator import (
-    CONTEXT_CLASSES,
     SCRIPT_CLASSES,
     ScriptRecord,
     create_bundle,
+    resolve_bundle_rules,
 )
 from rbxbundle.parser import iter_top_level_items
 from rbxbundle.utils import (
@@ -30,7 +30,7 @@ from rbxbundle.utils import (
 SUPPORTED_EXTS = {".rbxmx", ".rbxlx", ".xml", ".txt"}
 LOG = logging.getLogger("rbxbundle")
 
-_ARGPARSE_COMMANDS = {"build", "inspect", "list", "help", "--help", "-h", "--version"}
+_ARGPARSE_COMMANDS = {"build", "inspect", "list", "config", "help", "--help", "-h", "--version"}
 
 _FOLDERID_DOCUMENTS = ctypes.c_char_p if os.name != "nt" else None
 
@@ -109,28 +109,194 @@ def _resolve_config_path() -> Path:
 
 
 _CONFIG_PATH = _resolve_config_path()
+_PROJECT_CONFIG_FILENAMES = ("rbxbundle.json", ".rbxbundle.json")
+CONFIG_SCHEMA_VERSION = 1
+_ROOT_CONFIG_KEYS = {
+    "schema_version",
+    "input_dir",
+    "output_dir",
+    "roblox_rules",
+}
+_RULE_SET_KEYS = {
+    "context_classes",
+    "value_object_classes",
+    "min_hierarchy_classes",
+    "min_hierarchy_folder_names",
+}
+_RULE_PREFIX_KEYS = {
+    "server_only_prefixes",
+    "client_only_prefixes",
+    "primary_client_prefixes",
+}
 _DEFAULT_CONFIG: dict = {
+    "schema_version": CONFIG_SCHEMA_VERSION,
     "input_dir": str(DEFAULT_INPUT_DIR),
     "output_dir": str(DEFAULT_OUTPUT_DIR),
 }
 
 
-def _load_config() -> dict:
+class ConfigValidationError(ValueError):
+    pass
+
+
+def _normalize_string_list(
+    value: object,
+    *,
+    source: Path,
+    field_name: str,
+    lower: bool = False,
+) -> list[str] | None:
+    if not isinstance(value, list):
+        LOG.warning("Ignoring invalid config field %s in %s: expected a JSON array.", field_name, source)
+        return None
+
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            LOG.warning("Ignoring invalid config field %s in %s: expected only strings.", field_name, source)
+            return None
+        text = item.strip()
+        if not text:
+            continue
+        normalized.append(text.lower() if lower else text)
+
+    return list(dict.fromkeys(normalized))
+
+
+def _normalize_roblox_rules(raw: object, *, source: Path) -> dict:
+    if not isinstance(raw, dict):
+        LOG.warning("Ignoring invalid roblox_rules section in %s: expected a JSON object.", source)
+        return {}
+
+    normalized: dict = {}
+    for key, value in raw.items():
+        if key in _RULE_SET_KEYS:
+            items = _normalize_string_list(
+                value,
+                source=source,
+                field_name=f"roblox_rules.{key}",
+                lower=key == "min_hierarchy_folder_names",
+            )
+            if items is not None:
+                normalized[key] = items
+        elif key in _RULE_PREFIX_KEYS:
+            items = _normalize_string_list(
+                value,
+                source=source,
+                field_name=f"roblox_rules.{key}",
+            )
+            if items is not None:
+                normalized[key] = items
+        else:
+            LOG.warning("Ignoring unknown roblox_rules field %s in %s.", key, source)
+
+    return normalized
+
+
+def _normalize_schema_version(raw: object, *, source: Path) -> int | None:
+    if raw is None:
+        return CONFIG_SCHEMA_VERSION
+    if not isinstance(raw, int):
+        LOG.warning("Ignoring config at %s: schema_version must be an integer.", source)
+        return None
+    if raw != CONFIG_SCHEMA_VERSION:
+        LOG.warning(
+            "Ignoring config at %s: unsupported schema_version %s (supported: %s).",
+            source,
+            raw,
+            CONFIG_SCHEMA_VERSION,
+        )
+        return None
+    return raw
+
+
+def _validate_config_data(data: object, *, source: Path) -> tuple[dict, list[str]]:
+    if not isinstance(data, dict):
+        raise ConfigValidationError(f"{source}: expected a JSON object at the root.")
+
+    warnings: list[str] = []
+    schema_version = data.get("schema_version")
+    if schema_version is None:
+        warnings.append(
+            f"{source}: missing schema_version; assuming legacy schema {CONFIG_SCHEMA_VERSION}."
+        )
+        schema_version = CONFIG_SCHEMA_VERSION
+
+    if not isinstance(schema_version, int):
+        raise ConfigValidationError(f"{source}: schema_version must be an integer.")
+
+    if schema_version != CONFIG_SCHEMA_VERSION:
+        raise ConfigValidationError(
+            f"{source}: unsupported schema_version {schema_version} (supported: {CONFIG_SCHEMA_VERSION})."
+        )
+
+    cfg: dict = {"schema_version": schema_version}
+
+    for key in data.keys():
+        if key not in _ROOT_CONFIG_KEYS:
+            warnings.append(f"{source}: unknown config field `{key}` will be ignored.")
+
+    input_dir = data.get("input_dir")
+    if input_dir is None or isinstance(input_dir, str):
+        if input_dir is not None:
+            cfg["input_dir"] = input_dir
+    else:
+        raise ConfigValidationError(f"{source}: input_dir must be a string.")
+
+    output_dir = data.get("output_dir")
+    if output_dir is None or isinstance(output_dir, str):
+        if output_dir is not None:
+            cfg["output_dir"] = output_dir
+    else:
+        raise ConfigValidationError(f"{source}: output_dir must be a string.")
+
+    if "roblox_rules" in data:
+        roblox_rules = data["roblox_rules"]
+        if not isinstance(roblox_rules, dict):
+            raise ConfigValidationError(f"{source}: roblox_rules must be a JSON object.")
+        normalized_rules = _normalize_roblox_rules(roblox_rules, source=source)
+        for key in roblox_rules.keys():
+            if key not in _RULE_SET_KEYS and key not in _RULE_PREFIX_KEYS:
+                warnings.append(f"{source}: unknown roblox_rules field `{key}` will be ignored.")
+        cfg["roblox_rules"] = normalized_rules
+
+    return cfg, warnings
+
+
+def _load_config_file(path: Path) -> dict:
+    if not path.exists():
+        return {}
+
     try:
-        if _CONFIG_PATH.exists():
-            data = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
-            for k, v in _DEFAULT_CONFIG.items():
-                data.setdefault(k, v)
-            return data
-    except (OSError, json.JSONDecodeError):
-        pass
-    return dict(_DEFAULT_CONFIG)
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        LOG.warning("Could not load config at %s: %s", path, exc)
+        return {}
+
+    try:
+        cfg, warnings = _validate_config_data(data, source=path)
+    except ConfigValidationError as exc:
+        LOG.warning("Ignoring config at %s: %s", path, exc)
+        return {}
+
+    for warning in warnings:
+        LOG.warning(warning)
+
+    return cfg
+
+
+def _load_config() -> dict:
+    cfg = dict(_DEFAULT_CONFIG)
+    cfg.update(_load_config_file(_CONFIG_PATH))
+    return cfg
 
 
 def _save_config(cfg: dict) -> None:
     try:
         _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        persisted = dict(cfg)
+        persisted["schema_version"] = CONFIG_SCHEMA_VERSION
+        _CONFIG_PATH.write_text(json.dumps(persisted, indent=2), encoding="utf-8")
     except OSError as exc:
         LOG.warning("Could not save config at %s: %s", _CONFIG_PATH, exc)
 
@@ -282,8 +448,43 @@ def _resolve_cli_input_path(raw_path: str) -> Path:
     return candidate
 
 
-def _inspect_file(in_path: Path) -> dict:
+def _find_project_config_path(start_path: Path) -> Path | None:
+    directory = start_path if start_path.is_dir() else start_path.parent
+    for current in (directory, *directory.parents):
+        for filename in _PROJECT_CONFIG_FILENAMES:
+            candidate = current / filename
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def _find_config_in_cwd() -> Path | None:
+    cwd = Path.cwd()
+    for filename in _PROJECT_CONFIG_FILENAMES:
+        candidate = cwd / filename
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _resolve_config_validation_target(raw_path: str | None) -> Path | None:
+    if raw_path:
+        return Path(raw_path)
+    return _find_config_in_cwd()
+
+
+def _bundle_rules_for_path(in_path: Path) -> dict | None:
+    rules = dict(_load_config().get("roblox_rules") or {})
+    project_path = _find_project_config_path(in_path.parent)
+    if project_path is not None and project_path != _CONFIG_PATH:
+        project_cfg = _load_config_file(project_path)
+        rules.update(project_cfg.get("roblox_rules") or {})
+    return rules or None
+
+
+def _inspect_file(in_path: Path, rules: dict | None = None) -> dict:
     """Return a dict with basic stats about a Roblox file (no output written)."""
+    bundle_rules = resolve_bundle_rules(rules)
     xml_text = strip_junk_before_roblox(read_text(in_path))
     root = ET.fromstring(xml_text)
     top_items = iter_top_level_items(root)
@@ -296,7 +497,7 @@ def _inspect_file(in_path: Path) -> dict:
         total_count += 1
         if cls in SCRIPT_CLASSES:
             script_count += 1
-        if cls in CONTEXT_CLASSES:
+        if cls in bundle_rules.context_classes:
             context_count += 1
         for child in item:
             if local_tag(child.tag) == "Item":
@@ -319,9 +520,13 @@ def _run_build(
     include_context: bool,
 ) -> tuple[Path | None, Path | None, list[ScriptRecord] | None, str | None]:
     """Core build logic shared by interactive and argparse modes."""
+    rules = _bundle_rules_for_path(in_path)
     try:
         bundle_dir, zip_path, scripts = create_bundle(
-            in_path, output_dir=out_dir, include_context=include_context
+            in_path,
+            output_dir=out_dir,
+            include_context=include_context,
+            rules=rules,
         )
     except (RuntimeError, OSError, ValueError) as exc:
         return None, None, None, str(exc)
@@ -393,6 +598,8 @@ def _imode_help() -> None:
         ("rbxbundle list", "List supported files in the default input directory"),
         ("  --dir / -d  <dir>", f"Directory to scan  (default: {DEFAULT_INPUT_DIR})"),
         ("", ""),
+        ("rbxbundle config validate [file]", "Validate rbxbundle.json schema and fields"),
+        ("", ""),
         ("rbxbundle --help", "Show this reference and exit"),
     ]
 
@@ -414,6 +621,7 @@ def _imode_help() -> None:
         "rbxbundle build MyPlane.rbxmx --output ./bundles --no-context",
         "rbxbundle inspect MyModel.rbxmx",
         "rbxbundle list --dir ./models",
+        "rbxbundle config validate",
     ]
     for ex in examples:
         print(f"  {clr(CYN, '->')}  {clr(WHT, ex)}")
@@ -451,13 +659,14 @@ def _imode_build() -> None:
         return
 
     chosen = files[idx - 1]
+    rules = _bundle_rules_for_path(chosen)
 
     _clear()
     _banner()
     _section(f"Build - Options for {clr(YLW, chosen.name)}")
 
     try:
-        stats = _inspect_file(chosen)
+        stats = _inspect_file(chosen, rules=rules)
         _info("Size      " + clr(WHT, f"{stats['size_kb']:.1f} KB"))
         _info(f"Scripts   {clr(WHT, str(stats['scripts']))}")
         _info(f"Instances {clr(WHT, str(stats['instances']))}")
@@ -532,7 +741,7 @@ def _imode_inspect() -> None:
     _section(f"Inspect - {chosen.name}")
 
     try:
-        stats = _inspect_file(chosen)
+        stats = _inspect_file(chosen, rules=_bundle_rules_for_path(chosen))
         print()
         rows = [
             ("File", chosen.name),
@@ -667,7 +876,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        stats = _inspect_file(in_path)
+        stats = _inspect_file(in_path, rules=_bundle_rules_for_path(in_path))
     except ET.ParseError as exc:
         print(f"  Error: XML parse error: {exc}.", file=sys.stderr)
         return 1
@@ -715,6 +924,53 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_config_validate(args: argparse.Namespace) -> int:
+    target = _resolve_config_validation_target(getattr(args, "file", None))
+    if target is None:
+        print("  Error: no rbxbundle.json found in the current directory.", file=sys.stderr)
+        return 1
+
+    if not target.exists():
+        print(f"  Error: config file not found: {target}.", file=sys.stderr)
+        return 1
+
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"  Error: could not parse config: {exc}.", file=sys.stderr)
+        return 1
+
+    try:
+        normalized, warnings = _validate_config_data(data, source=target)
+    except ConfigValidationError as exc:
+        print(f"\n  {clr(RED, 'Config invalid')}")
+        print(f"  {exc}")
+        print()
+        return 1
+
+    print(f"\n  {clr(B + BLU, 'rbxbundle config validate')}")
+    print(f"  {'file':<10} {clr(WHT, str(target))}")
+    print(f"  {'schema':<10} {normalized['schema_version']}")
+    if "input_dir" in normalized:
+        print(f"  {'input_dir':<10} {clr(WHT, normalized['input_dir'])}")
+    if "output_dir" in normalized:
+        print(f"  {'output_dir':<10} {clr(WHT, normalized['output_dir'])}")
+    if normalized.get("roblox_rules"):
+        print(f"  {'rules':<10} {len(normalized['roblox_rules'])} override set(s)")
+    else:
+        print(f"  {'rules':<10} 0 override set(s)")
+    print()
+
+    if warnings:
+        print(f"  {clr(YLW, '[WARN]')}  Config is valid with warnings:")
+        for warning in warnings:
+            print(f"  - {warning}")
+    else:
+        print(f"  {clr(GRN, '[OK]')}  Config is valid.")
+    print()
+    return 0
+
+
 def _build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rbxbundle",
@@ -727,6 +983,8 @@ def _build_argparser() -> argparse.ArgumentParser:
               rbxbundle inspect MyModel.rbxmx
               rbxbundle list
               rbxbundle list --dir ./models
+              rbxbundle config validate
+              rbxbundle config validate ./rbxbundle.json
               rbxbundle --version
         """),
     )
@@ -759,6 +1017,15 @@ def _build_argparser() -> argparse.ArgumentParser:
         help=f"Directory to scan  (default: {DEFAULT_INPUT_DIR}).",
     )
 
+    pc = sub.add_parser("config", help="Configuration helpers.")
+    config_sub = pc.add_subparsers(dest="config_command")
+    pcv = config_sub.add_parser("validate", help="Validate a rbxbundle.json file.")
+    pcv.add_argument(
+        "file",
+        nargs="?",
+        help="Config file to validate. Defaults to ./rbxbundle.json or ./.rbxbundle.json.",
+    )
+
     return parser
 
 
@@ -785,9 +1052,13 @@ def main() -> None:
             "build": cmd_build,
             "inspect": cmd_inspect,
             "list": cmd_list,
+            "config": cmd_config_validate,
         }
         handler = dispatch.get(args.command)
         if handler is None:
+            parser.print_help()
+            sys.exit(0)
+        if args.command == "config" and getattr(args, "config_command", None) != "validate":
             parser.print_help()
             sys.exit(0)
         sys.exit(handler(args))

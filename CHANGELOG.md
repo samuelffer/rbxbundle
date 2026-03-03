@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+## [0.5.7] - 2026-03-03
+
+### Added
+- Added a `CI` workflow that runs the test suite on `push` and `pull_request`.
+- Added configurable Roblox bundle rules via `create_bundle(..., rules=...)`, `generate_summary(..., rules=...)`, and project-level `rbxbundle.json`.
+- Added a formal `schema_version` for `rbxbundle.json` configs, with legacy v1 compatibility when the field is missing.
+- Added `rbxbundle config validate [FILE]` to validate config schema and rule fields explicitly.
+- Added a packaging smoke test in CI for the installed `rbxbundle` CLI entry point.
+
+### Fixed
+- Hardened CLI config loading so valid JSON with the wrong root type no longer crashes startup.
+- Added regression coverage for invalid config roots, schema-version handling, and custom rule overrides.
+
 ## [0.5.6] - 2026-03-03
 
 ### Added

@@ -65,6 +65,46 @@ class TestCreateBundleErrors(unittest.TestCase):
             summary = (out_dir / "sample_bundle" / "SUMMARY.md").read_text(encoding="utf-8")
             self.assertIn("Dependencies could not be analyzed; see `DEPENDENCIES_ERROR.txt`.", summary)
 
+    def test_create_bundle_respects_custom_context_rules(self):
+        xml = """\
+<roblox>
+  <Item class="DataModel">
+    <Item class="ReplicatedStorage">
+      <Properties>
+        <string name="Name">ReplicatedStorage</string>
+      </Properties>
+      <Item class="Folder">
+        <Properties>
+          <string name="Name">Remotes</string>
+        </Properties>
+      </Item>
+      <Item class="RemoteEvent">
+        <Properties>
+          <string name="Name">BootRemote</string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+</roblox>
+"""
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            in_path = base / "sample.rbxmx"
+            out_dir = base / "out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            in_path.write_text(xml, encoding="utf-8")
+
+            bundle_dir, _, _ = create_bundle(
+                in_path,
+                output_dir=out_dir,
+                include_context=True,
+                rules={"context_classes": ["RemoteEvent"]},
+            )
+
+            context_text = (bundle_dir / "CONTEXT.txt").read_text(encoding="utf-8")
+            self.assertIn("ReplicatedStorage/BootRemote (RemoteEvent)", context_text)
+            self.assertNotIn("ReplicatedStorage/Remotes (Folder)", context_text)
+
     def test_run_context_controls_exec_side_export_and_metadata(self):
         xml = """\
 <roblox>
@@ -373,6 +413,46 @@ class TestGenerateSummaryBoundaryAlerts(unittest.TestCase):
 
         self.assertIn("## Client/Server Boundary Alerts", summary)
         self.assertIn("*(no client/server boundary alerts)*", summary)
+
+    def test_boundary_alert_respects_custom_prefix_rules(self):
+        scripts = [
+            ScriptRecord(
+                class_name="Script",
+                name="ServerMain",
+                full_path="ServerRuntime/ServerMain",
+                rel_file="scripts/ServerRuntime/ServerMain.server.lua",
+                source_len=10,
+                run_context_value=1,
+                exec_side="server",
+            )
+        ]
+        edges_json = [
+            {
+                "from": "ServerRuntime/ServerMain",
+                "to": "ClientRuntime/Hud",
+                "kind": "require",
+                "confidence": 1.0,
+                "loc": {"line": 7},
+            }
+        ]
+
+        summary = generate_summary(
+            source_file="sample.rbxmx",
+            scripts=scripts,
+            contexts=[],
+            attributes=[],
+            nodes_json=[],
+            edges_json=edges_json,
+            include_context=False,
+            rules={
+                "client_only_prefixes": ["ClientRuntime/"],
+                "primary_client_prefixes": ["ClientRuntime/"],
+                "server_only_prefixes": ["ServerRuntime/"],
+            },
+        )
+
+        self.assertIn("server-side script depending on client-only path", summary)
+        self.assertIn("ClientRuntime/Hud", summary)
 
 
 class TestGenerateSummaryFormatting(unittest.TestCase):

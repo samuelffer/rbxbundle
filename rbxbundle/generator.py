@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import zipfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,65 +40,96 @@ LOG = logging.getLogger("rbxbundle")
 
 SCRIPT_CLASSES = {"Script", "LocalScript", "ModuleScript"}
 
-CONTEXT_CLASSES = {
-    "RemoteEvent",
-    "RemoteFunction",
-    "BindableEvent",
-    "BindableFunction",
-    "StringValue",
-    "NumberValue",
-    "BoolValue",
-    "IntValue",
-    "ObjectValue",
-    "Folder",
-    "Configuration",
-}
+@dataclass(frozen=True)
+class BundleRules:
+    context_classes: frozenset[str]
+    value_object_classes: frozenset[str]
+    server_only_prefixes: tuple[str, ...]
+    client_only_prefixes: tuple[str, ...]
+    primary_client_prefixes: tuple[str, ...]
+    min_hierarchy_classes: frozenset[str]
+    min_hierarchy_folder_names: frozenset[str]
 
-VALUE_OBJECT_CLASSES = {"StringValue", "NumberValue", "BoolValue", "IntValue", "ObjectValue"}
 
-SERVER_ONLY_PREFIXES = (
-    "ServerScriptService/",
-    "ServerStorage/",
+DEFAULT_BUNDLE_RULES = BundleRules(
+    context_classes=frozenset(
+        {
+            "RemoteEvent",
+            "RemoteFunction",
+            "BindableEvent",
+            "BindableFunction",
+            "StringValue",
+            "NumberValue",
+            "BoolValue",
+            "IntValue",
+            "ObjectValue",
+            "Folder",
+            "Configuration",
+        }
+    ),
+    value_object_classes=frozenset({"StringValue", "NumberValue", "BoolValue", "IntValue", "ObjectValue"}),
+    server_only_prefixes=(
+        "ServerScriptService/",
+        "ServerStorage/",
+    ),
+    client_only_prefixes=(
+        "StarterPlayer/",
+        "StarterGui/",
+        "StarterPack/",
+        "ReplicatedFirst/",
+    ),
+    primary_client_prefixes=(
+        "StarterPlayer/",
+        "StarterGui/",
+        "StarterPack/",
+    ),
+    min_hierarchy_classes=frozenset(
+        {
+            "RemoteEvent",
+            "RemoteFunction",
+            "BindableEvent",
+            "BindableFunction",
+            "StringValue",
+            "NumberValue",
+            "BoolValue",
+            "IntValue",
+            "ObjectValue",
+            "Configuration",
+            "Animation",
+        }
+    ),
+    min_hierarchy_folder_names=frozenset(
+        {
+            "config",
+            "configs",
+            "configuration",
+            "configurations",
+            "settings",
+            "setting",
+            "remotes",
+            "remote",
+            "bindables",
+            "bindable",
+        }
+    ),
 )
 
-CLIENT_ONLY_PREFIXES = (
-    "StarterPlayer/",
-    "StarterGui/",
-    "StarterPack/",
-    "ReplicatedFirst/",
-)
+CONTEXT_CLASSES = DEFAULT_BUNDLE_RULES.context_classes
+VALUE_OBJECT_CLASSES = DEFAULT_BUNDLE_RULES.value_object_classes
+SERVER_ONLY_PREFIXES = DEFAULT_BUNDLE_RULES.server_only_prefixes
+CLIENT_ONLY_PREFIXES = DEFAULT_BUNDLE_RULES.client_only_prefixes
+PRIMARY_CLIENT_PREFIXES = DEFAULT_BUNDLE_RULES.primary_client_prefixes
+MIN_HIERARCHY_CLASSES = DEFAULT_BUNDLE_RULES.min_hierarchy_classes
+MIN_HIERARCHY_FOLDER_NAMES = DEFAULT_BUNDLE_RULES.min_hierarchy_folder_names
 
-PRIMARY_CLIENT_PREFIXES = (
-    "StarterPlayer/",
-    "StarterGui/",
-    "StarterPack/",
-)
-
-MIN_HIERARCHY_CLASSES = {
-    "RemoteEvent",
-    "RemoteFunction",
-    "BindableEvent",
-    "BindableFunction",
-    "StringValue",
-    "NumberValue",
-    "BoolValue",
-    "IntValue",
-    "ObjectValue",
-    "Configuration",
-    "Animation",
-}
-
-MIN_HIERARCHY_FOLDER_NAMES = {
-    "config",
-    "configs",
-    "configuration",
-    "configurations",
-    "settings",
-    "setting",
-    "remotes",
-    "remote",
-    "bindables",
-    "bindable",
+_RULE_FIELDS = {
+    "context_classes",
+    "value_object_classes",
+    "server_only_prefixes",
+    "client_only_prefixes",
+    "primary_client_prefixes",
+    "min_hierarchy_classes",
+    "min_hierarchy_folder_names",
 }
 
 SEVERITY_ORDER = {
@@ -149,6 +181,60 @@ class WarningRecord:
     path: str
     code: str
     message: str
+
+
+def _normalize_rule_strings(
+    value: object,
+    *,
+    field_name: str,
+    lower: bool = False,
+) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        raise TypeError(f"rules.{field_name} must be a list of strings")
+
+    items: List[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise TypeError(f"rules.{field_name} must contain only strings")
+        text = item.strip()
+        if not text:
+            continue
+        items.append(text.lower() if lower else text)
+
+    return tuple(dict.fromkeys(items))
+
+
+def resolve_bundle_rules(rules: BundleRules | Mapping[str, object] | None = None) -> BundleRules:
+    if rules is None:
+        return DEFAULT_BUNDLE_RULES
+
+    if isinstance(rules, BundleRules):
+        return rules
+
+    if not isinstance(rules, Mapping):
+        raise TypeError("rules must be a mapping or BundleRules")
+
+    resolved = {
+        "context_classes": DEFAULT_BUNDLE_RULES.context_classes,
+        "value_object_classes": DEFAULT_BUNDLE_RULES.value_object_classes,
+        "server_only_prefixes": DEFAULT_BUNDLE_RULES.server_only_prefixes,
+        "client_only_prefixes": DEFAULT_BUNDLE_RULES.client_only_prefixes,
+        "primary_client_prefixes": DEFAULT_BUNDLE_RULES.primary_client_prefixes,
+        "min_hierarchy_classes": DEFAULT_BUNDLE_RULES.min_hierarchy_classes,
+        "min_hierarchy_folder_names": DEFAULT_BUNDLE_RULES.min_hierarchy_folder_names,
+    }
+
+    for key, value in rules.items():
+        if key not in _RULE_FIELDS:
+            continue
+        lower = key == "min_hierarchy_folder_names"
+        normalized = _normalize_rule_strings(value, field_name=key, lower=lower)
+        if key.endswith("_prefixes"):
+            resolved[key] = normalized
+        else:
+            resolved[key] = frozenset(normalized)
+
+    return BundleRules(**resolved)
 
 
 def _normalized_run_context(class_name: str, run_context_value: int | None) -> Tuple[int | None, str]:
@@ -219,12 +305,12 @@ def _is_runtime_script(record: ScriptRecord) -> bool:
     return record.class_name in {"Script", "LocalScript"}
 
 
-def _is_relevant_min_item(class_name: str, name: str) -> bool:
+def _is_relevant_min_item(class_name: str, name: str, rules: BundleRules) -> bool:
     if class_name in SCRIPT_CLASSES:
         return True
-    if class_name in MIN_HIERARCHY_CLASSES:
+    if class_name in rules.min_hierarchy_classes:
         return True
-    if class_name == "Folder" and name.strip().lower() in MIN_HIERARCHY_FOLDER_NAMES:
+    if class_name == "Folder" and name.strip().lower() in rules.min_hierarchy_folder_names:
         return True
     return False
 
@@ -233,31 +319,31 @@ def _build_hierarchy_min_lines(items: List[Tuple[str, str]]) -> List[str]:
     return [f"{full_path} ({class_name})" for full_path, class_name in items]
 
 
-def _is_expected_client_path(path: str) -> bool:
-    return path.startswith(CLIENT_ONLY_PREFIXES)
+def _is_expected_client_path(path: str, rules: BundleRules) -> bool:
+    return path.startswith(rules.client_only_prefixes)
 
 
-def _is_expected_server_path(path: str) -> bool:
-    return path.startswith(SERVER_ONLY_PREFIXES)
+def _is_expected_server_path(path: str, rules: BundleRules) -> bool:
+    return path.startswith(rules.server_only_prefixes)
 
 
-def _entry_point_priority(record: ScriptRecord) -> Tuple[int, str]:
+def _entry_point_priority(record: ScriptRecord, rules: BundleRules) -> Tuple[int, str]:
     path = record.full_path
     exec_side = _script_exec_side(record)
 
     if exec_side == "server":
         if path.startswith("ServerScriptService/"):
             return (0, path)
-        if not _is_expected_server_path(path):
+        if not _is_expected_server_path(path, rules):
             return (1, path)
         return (2, path)
 
     if exec_side == "client":
-        if path.startswith(PRIMARY_CLIENT_PREFIXES):
+        if path.startswith(rules.primary_client_prefixes):
             return (0, path)
         if path.startswith("ReplicatedFirst/"):
             return (1, path)
-        if not _is_expected_client_path(path):
+        if not _is_expected_client_path(path, rules):
             return (2, path)
         return (3, path)
 
@@ -268,7 +354,11 @@ def _warning_sort_key(record: WarningRecord) -> Tuple[int, str, str]:
     return (SEVERITY_ORDER.get(record.severity, 99), record.path, record.message)
 
 
-def _collect_warnings(scripts: List[ScriptRecord], script_sources: Dict[str, str]) -> List[WarningRecord]:
+def _collect_warnings(
+    scripts: List[ScriptRecord],
+    script_sources: Dict[str, str],
+    rules: BundleRules,
+) -> List[WarningRecord]:
     warnings: List[WarningRecord] = []
 
     for script in scripts:
@@ -299,7 +389,7 @@ def _collect_warnings(scripts: List[ScriptRecord], script_sources: Dict[str, str
                 )
             )
 
-        if exec_side == "server" and path.startswith(PRIMARY_CLIENT_PREFIXES):
+        if exec_side == "server" and path.startswith(rules.primary_client_prefixes):
             warnings.append(
                 WarningRecord(
                     severity="WARN",
@@ -394,7 +484,14 @@ def _unique_child_name(parent_used: Dict[str, int], base_safe: str, referent: st
     return f"{base_safe}__{n}__{tail}" if tail else f"{base_safe}__{n}"
 
 
-def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> Tuple[Path, Path, List[ScriptRecord]]:
+def create_bundle(
+    in_path: Path,
+    *,
+    output_dir: Path,
+    include_context: bool,
+    rules: BundleRules | Mapping[str, object] | None = None,
+) -> Tuple[Path, Path, List[ScriptRecord]]:
+    bundle_rules = resolve_bundle_rules(rules)
     xml_text = strip_junk_before_roblox(read_text(in_path))
 
     try:
@@ -448,7 +545,7 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
         )
 
         hierarchy_lines.append(f"{' ' * depth}- {safe_name} ({class_name})")
-        if _is_relevant_min_item(class_name, name):
+        if _is_relevant_min_item(class_name, name, bundle_rules):
             hierarchy_min_items.append((full_path, class_name))
 
         for aname, atype, aval in parse_attributes(
@@ -459,13 +556,13 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
         ):
             attributes.append(AttributeRecord(class_name, name, full_path, aname, atype, aval))
 
-        if include_context and class_name in CONTEXT_CLASSES:
+        if include_context and class_name in bundle_rules.context_classes:
             detail: Dict[str, str] = {}
             if class_name in {"RemoteEvent", "RemoteFunction"}:
                 detail["kind"] = "Remote"
             elif class_name in {"BindableEvent", "BindableFunction"}:
                 detail["kind"] = "Bindable"
-            elif class_name in VALUE_OBJECT_CLASSES:
+            elif class_name in bundle_rules.value_object_classes:
                 detail["kind"] = "ValueObject"
                 v = get_value(props)
                 if v is not None:
@@ -681,7 +778,7 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
         nodes_json = []
         edges_json = []
 
-    warnings = _collect_warnings(scripts, script_sources)
+    warnings = _collect_warnings(scripts, script_sources, bundle_rules)
     safe_write_text(bundle_dir / "WARNINGS.txt", _render_warnings(warnings), encoding="utf-8")
 
     manifest = _manifest_payload(
@@ -708,6 +805,7 @@ def create_bundle(in_path: Path, *, output_dir: Path, include_context: bool) -> 
             edges_json=edges_json,
             include_context=include_context,
             dependency_analysis_failed=dependency_analysis_failed,
+            rules=bundle_rules,
         )
         safe_write_text(bundle_dir / "SUMMARY.md", summary_md, encoding="utf-8")
     except (KeyError, TypeError, ValueError) as e:
@@ -777,9 +875,11 @@ def generate_summary(
     edges_json: List[dict],
     include_context: bool,
     dependency_analysis_failed: bool = False,
+    rules: BundleRules | Mapping[str, object] | None = None,
 ) -> str:
     """Return the content of SUMMARY.md as a string."""
 
+    bundle_rules = resolve_bundle_rules(rules)
     lines: List[str] = []
     disabled_scripts = [s for s in scripts if s.disabled]
     client_scripts = [s for s in scripts if _script_exec_side(s) == "client"]
@@ -789,11 +889,11 @@ def generate_summary(
     unknown_scripts = [s for s in scripts if _script_exec_side(s) == "unknown"]
     enabled_server_entry_points = sorted(
         [s for s in server_scripts if not s.disabled],
-        key=_entry_point_priority,
+        key=lambda record: _entry_point_priority(record, bundle_rules),
     )
     enabled_client_entry_points = sorted(
         [s for s in client_scripts if not s.disabled],
-        key=_entry_point_priority,
+        key=lambda record: _entry_point_priority(record, bundle_rules),
     )
 
     lines += [
@@ -939,13 +1039,13 @@ def generate_summary(
 
         src_exec_side = _script_exec_side(src_script)
 
-        if src_exec_side == "client" and dest.startswith(SERVER_ONLY_PREFIXES):
+        if src_exec_side == "client" and dest.startswith(bundle_rules.server_only_prefixes):
             boundary_alerts.append(
                 f"- [!] `{origin}` -> `{dest}`{line_info} "
                 "(client-side script depending on server-only path)"
             )
 
-        if src_exec_side == "server" and dest.startswith(CLIENT_ONLY_PREFIXES):
+        if src_exec_side == "server" and dest.startswith(bundle_rules.client_only_prefixes):
             boundary_alerts.append(
                 f"- [!] `{origin}` -> `{dest}`{line_info} "
                 "(server-side script depending on client-only path)"
