@@ -1,20 +1,23 @@
-
 # RBX Bundle CLI
-#Two modes, one entry point:
-
-#  python cli.py              → launches the interactive TUI menu
-#  python cli.py build ...    → runs the argparse command directly (no menus)
-#  python cli.py inspect ...
-#  python cli.py list ...
-
-#The mode is chosen by whether the first argument is a known sub-command.
-#If it is → argparse mode.  If not (or no args) → interactive mode.
-
+# Two modes, one entry point:
+#
+#   python cli.py                        → launches the interactive TUI (default)
+#   python cli.py build MyModel.rbxmx   → runs directly in argparse/CLI mode
+#   python cli.py inspect MyModel.rbxmx
+#   python cli.py list
+#
+# Switch and save the default startup mode:
+#   python cli.py --mode interactive
+#   python cli.py --mode argparse
+#
+# Settings are persisted in rbxbundle.json (same folder as this file).
+#
 #==========================================================================================================
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import shutil
@@ -49,7 +52,34 @@ LOG = logging.getLogger("rbxbundle")
 # Sub-commands that trigger argparse mode
 _ARGPARSE_COMMANDS = {"build", "inspect", "list", "help", "--help", "-h"}
 
-# ===== Terminal helpers ===================================================
+# ===== Config (persisted settings) ========================================
+
+# Config lives next to cli.py — easy to find, edit, and version-control.
+_CONFIG_PATH = Path(__file__).parent / "rbxbundle.json"
+_DEFAULT_CONFIG: dict = {
+    "startup_mode": "interactive",   # "interactive" | "argparse"
+    "input_dir":    str(DEFAULT_INPUT_DIR),
+    "output_dir":   str(DEFAULT_OUTPUT_DIR),
+}
+
+def _load_config() -> dict:
+    try:
+        if _CONFIG_PATH.exists():
+            data = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+            for k, v in _DEFAULT_CONFIG.items():
+                data.setdefault(k, v)
+            return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    return dict(_DEFAULT_CONFIG)
+
+def _save_config(cfg: dict) -> None:
+    try:
+        _CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    except OSError as exc:
+        LOG.warning("Could not save config: %s", exc)
+
+
 
 def _term_width() -> int:
     return shutil.get_terminal_size((80, 24)).columns
@@ -100,7 +130,6 @@ def _banner() -> None:
     ver   = f"v{__version__}  "
     pad   = w - len(title) - len(ver) - 2
     print(f"{clr(B+BLU, title)}{' ' * max(pad, 1)}{clr(GRY, ver)}")
-    print(clr(GRY, "  .rbxmx Context Bundler"))
     _print_hr("═", BLU)
     print()
 
@@ -207,6 +236,11 @@ def _run_build(
 
 def _imode_main_menu() -> None:
     """Top-level interactive menu loop."""
+    global DEFAULT_INPUT_DIR, DEFAULT_OUTPUT_DIR
+
+    cfg = _load_config()
+    DEFAULT_INPUT_DIR  = Path(cfg["input_dir"])
+    DEFAULT_OUTPUT_DIR = Path(cfg["output_dir"])
     ensure_dirs(DEFAULT_INPUT_DIR, DEFAULT_OUTPUT_DIR)
 
     while True:
@@ -217,10 +251,10 @@ def _imode_main_menu() -> None:
         print(f"  {clr(B+GRN, '[1]')}  {clr(WHT, 'Build')}         {clr(GRY, '— process a file and generate the bundle')}")
         print(f"  {clr(B+BLU, '[2]')}  {clr(WHT, 'Inspect')}       {clr(GRY, '— peek inside a file without building')}")
         print(f"  {clr(B+YLW, '[3]')}  {clr(WHT, 'List files')}    {clr(GRY, '— show available files in input/')}")
-        print(f"  {clr(B+PRP, '[4]')}  {clr(WHT, 'Settings')}      {clr(GRY, '— change input/output directories')}")
+        print(f"  {clr(B+PRP, '[4]')}  {clr(WHT, 'Settings')}      {clr(GRY, '— directories, startup mode, and more')}")
+        print(f"  {clr(B+CYN, '[H]')}  {clr(WHT, 'Help')}          {clr(GRY, '— usage reference for CLI / argparse mode')}")
         print(f"  {clr(B+GRY, '[0]')}  {clr(GRY, 'Exit')}")
         print()
-        _tip(f"Tip: run  {clr(WHT, 'python cli.py build <file>')}  to skip menus entirely.")
 
         choice = _prompt("Choose an option:")
 
@@ -231,7 +265,11 @@ def _imode_main_menu() -> None:
         elif choice == "3":
             _imode_list()
         elif choice == "4":
-            _imode_settings()
+            cfg = _imode_settings(cfg)
+            DEFAULT_INPUT_DIR  = Path(cfg["input_dir"])
+            DEFAULT_OUTPUT_DIR = Path(cfg["output_dir"])
+        elif choice.lower() == "h":
+            _imode_help()
         elif choice in ("0", "q", "exit", "quit", ""):
             _clear()
             print(f"\n  {clr(GRY, 'Goodbye.')}\n")
@@ -239,6 +277,65 @@ def _imode_main_menu() -> None:
         else:
             _err("Invalid option. Press Enter to try again.")
             input()
+
+
+# === interactive: HELP =====================================================
+
+def _imode_help() -> None:
+    _clear()
+    _banner()
+    _section("CLI / Argparse Reference")
+    print()
+    print(f"  {clr(GRY, 'When you pass arguments directly, rbxbundle runs in argparse mode')}")
+    print(f"  {clr(GRY, 'and skips the interactive menus entirely.')}")
+    print()
+
+    rows = [
+        ("COMMAND",                    "DESCRIPTION"),
+        ("",                           ""),
+        ("rbxbundle build <file>",     "Generate a full bundle from a Roblox file"),
+        ("  --output / -o  <dir>",     f"Output directory  (default: output/)"),
+        ("  --no-context",             "Skip CONTEXT.txt generation"),
+        ("  --verbose / -v",           "Enable debug logging"),
+        ("",                           ""),
+        ("rbxbundle inspect <file>",   "Show stats without writing any output"),
+        ("",                           ""),
+        ("rbxbundle list",             "List supported files in input/"),
+        ("  --dir / -d  <dir>",        "Directory to scan  (default: input/)"),
+        ("",                           ""),
+        ("rbxbundle --help",           "Show this reference and exit"),
+    ]
+
+    cmd_w = max(len(r[0]) for r in rows) + 3
+    for cmd, desc in rows:
+        if cmd == "COMMAND":
+            print(f"  {clr(B+GRY, cmd.ljust(cmd_w))}{clr(B+GRY, desc)}")
+            continue
+        if cmd == "":
+            print()
+            continue
+        color = YLW if not cmd.startswith("  ") else GRY
+        print(f"  {clr(color, cmd.ljust(cmd_w))}{clr(WHT, desc)}")
+
+    print()
+    _section("Examples")
+    examples = [
+        "rbxbundle build MyPlane.rbxmx",
+        "rbxbundle build MyPlane.rbxmx --output ./bundles --no-context",
+        "rbxbundle inspect MyModel.rbxmx",
+        "rbxbundle list --dir ./models",
+    ]
+    for ex in examples:
+        print(f"  {clr(CYN, '→')}  {clr(WHT, ex)}")
+
+    print()
+    _section("Supported file extensions")
+    print(f"  {clr(WHT, '.rbxmx')}  {clr(GRY, 'Roblox model file')}")
+    print(f"  {clr(WHT, '.rbxlx')}  {clr(GRY, 'Roblox place file')}")
+    print(f"  {clr(WHT, '.xml')}    {clr(GRY, 'Generic XML')}")
+    print(f"  {clr(WHT, '.txt')}    {clr(GRY, 'Plain text (must contain valid Roblox XML)')}")
+    print()
+    _prompt("Press Enter to go back.")
 
 
 # === interactive: BUILD ============================================
@@ -403,39 +500,58 @@ def _imode_list() -> None:
 
 # === interactive: SETTINGS =================================================
 
-def _imode_settings() -> None:
+def _imode_settings(cfg: dict) -> dict:
     global DEFAULT_INPUT_DIR, DEFAULT_OUTPUT_DIR
 
     while True:
         _clear()
         _banner()
         _section("Settings")
-        _info(f"Input  dir  {clr(WHT, str(DEFAULT_INPUT_DIR.resolve()))}")
-        _info(f"Output dir  {clr(WHT, str(DEFAULT_OUTPUT_DIR.resolve()))}")
+
+        mode_label = clr(GRN, "interactive") if cfg["startup_mode"] == "interactive" else clr(YLW, "argparse (CLI)")
+        _info(f"Startup mode  {mode_label}")
+        _info(f"Input  dir    {clr(WHT, str(Path(cfg['input_dir']).resolve()))}")
+        _info(f"Output dir    {clr(WHT, str(Path(cfg['output_dir']).resolve()))}")
+        _info(f"Config file   {clr(GRY, str(_CONFIG_PATH.name))}  {clr(DIM, f'({_CONFIG_PATH})')}")
         print()
-        print(f"  {clr(B+YLW, '[1]')}  Change input directory")
-        print(f"  {clr(B+YLW, '[2]')}  Change output directory")
-        print(f"  {clr(B+GRY, '[0]')}  Back")
+        print(f"  {clr(B+CYN,  '[1]')}  Toggle startup mode  {clr(GRY, '— interactive ↔ argparse')}")
+        print(f"  {clr(B+YLW,  '[2]')}  Change input directory")
+        print(f"  {clr(B+YLW,  '[3]')}  Change output directory")
+        print(f"  {clr(B+GRY,  '[0]')}  Back")
 
         choice = _prompt("Choose:")
+
         if choice == "1":
+            cfg["startup_mode"] = "argparse" if cfg["startup_mode"] == "interactive" else "interactive"
+            _save_config(cfg)
+            new_label = clr(GRN, "interactive") if cfg["startup_mode"] == "interactive" else clr(YLW, "argparse")
+            _ok(f"Startup mode set to  {new_label}")
+            input("  Press Enter to continue.")
+
+        elif choice == "2":
             raw = _prompt("New input directory path:")
             if raw:
                 p = Path(raw)
                 p.mkdir(parents=True, exist_ok=True)
+                cfg["input_dir"] = str(p)
                 DEFAULT_INPUT_DIR = p
+                _save_config(cfg)
                 _ok(f"Input directory set to  {p.resolve()}")
                 input("  Press Enter to continue.")
-        elif choice == "2":
+
+        elif choice == "3":
             raw = _prompt("New output directory path:")
             if raw:
                 p = Path(raw)
                 p.mkdir(parents=True, exist_ok=True)
+                cfg["output_dir"] = str(p)
                 DEFAULT_OUTPUT_DIR = p
+                _save_config(cfg)
                 _ok(f"Output directory set to  {p.resolve()}")
                 input("  Press Enter to continue.")
+
         elif choice in ("0", "", "q"):
-            return
+            return cfg
         else:
             _err("Invalid option.")
             input()
@@ -449,42 +565,40 @@ def cmd_build(args: argparse.Namespace) -> int:
     in_path = Path(args.file)
 
     if not in_path.exists():
-        _err(f"File not found: {in_path}")
+        print(f"  error: file not found: {in_path}", file=sys.stderr)
         return 1
 
     if in_path.suffix.lower() not in SUPPORTED_EXTS:
-        _warn(f"Extension '{in_path.suffix}' is not officially supported. Proceeding anyway.")
+        print(f"  warning: extension '{in_path.suffix}' is not officially supported, proceeding anyway.")
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
     include_context = not args.no_context
 
-    _print_hr("═", BLU)
-    _ok("rbxbundle build")
-    _info(f"Input   {clr(WHT, str(in_path.resolve()))}")
-    _info(f"Output  {clr(WHT, str(out_dir.resolve()))}")
-    _info(f"Context {clr(GRN, 'yes') if include_context else clr(GRY, 'no')}")
-    _print_hr("═", BLU)
+    print(f"\n  {clr(B+BLU, 'rbxbundle build')}")
+    print(f"  {'input':<10} {clr(WHT, str(in_path))}")
+    print(f"  {'output':<10} {clr(WHT, str(out_dir))}")
+    print(f"  {'context':<10} {clr(GRN, 'yes') if include_context else clr(GRY, 'no')}")
+    print()
 
     bundle_dir, zip_path, scripts, err = _run_build(in_path, out_dir, include_context)
 
     if err:
-        _err(f"Build failed: {err}")
+        print(f"  {clr(RED, 'error:')} {err}", file=sys.stderr)
         return 1
 
     if scripts is None or bundle_dir is None or zip_path is None:
-        _err("Build failed: unexpected empty result.")
+        print(f"  {clr(RED, 'error:')} unexpected empty result.", file=sys.stderr)
         return 1
 
     nonempty = sum(1 for s in scripts if s.source_len > 0)
     empty    = len(scripts) - nonempty
 
-    _print_hr("─", GRN)
-    _ok("Done!")
-    _info(f"Scripts   {len(scripts)}  ({nonempty} with code, {empty} empty)")
-    _info(f"Bundle    {bundle_dir}")
-    _info(f"ZIP       {clr(BLU, str(zip_path))}")
-    _print_hr("─", GRN)
+    print(f"  {clr(GRN, '✔')}  done")
+    print(f"  {'scripts':<10} {len(scripts)}  {clr(GRY, f'({nonempty} with code, {empty} empty)')}")
+    print(f"  {'bundle':<10} {clr(WHT, str(bundle_dir))}")
+    print(f"  {'zip':<10} {clr(BLU, str(zip_path))}")
+    print()
     return 0
 
 
@@ -492,75 +606,82 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     in_path = Path(args.file)
 
     if not in_path.exists():
-        _err(f"File not found: {in_path}")
+        print(f"  error: file not found: {in_path}", file=sys.stderr)
         return 1
 
     try:
         stats = _inspect_file(in_path)
     except ET.ParseError as exc:
-        _err(f"XML parse error: {exc}")
+        print(f"  error: XML parse error: {exc}", file=sys.stderr)
         return 1
     except (OSError, ValueError) as exc:
-        _err(f"Failed to inspect: {exc}")
+        print(f"  error: {exc}", file=sys.stderr)
         return 1
 
-    print()
+    print(f"\n  {clr(B+BLU, 'rbxbundle inspect')}")
     rows = [
-        ("File",      in_path.name),
-        ("Size",      f"{stats['size_kb']:.1f} KB"),
-        ("Instances", str(stats['instances'])),
-        ("Scripts",   f"{stats['scripts']}  (Script / LocalScript / ModuleScript)"),
-        ("Context",   f"{stats['context']}  (RemoteEvent, Folder, ValueObject…)"),
+        ("file",      in_path.name),
+        ("size",      f"{stats['size_kb']:.1f} KB"),
+        ("instances", str(stats['instances'])),
+        ("scripts",   f"{stats['scripts']}  {clr(GRY, '(Script / LocalScript / ModuleScript)')}"),
+        ("context",   f"{stats['context']}  {clr(GRY, '(RemoteEvent, Folder, ValueObject…)')}"),
     ]
-    label_w = max(len(r[0]) for r in rows) + 2
     for label, value in rows:
-        pad = " " * (label_w - len(label))
-        print(f"  {clr(GRY, label)}{pad}{clr(WHT, value)}")
+        print(f"  {clr(GRY, f'{label:<12}')}{value}")
     print()
     return 0
 
 
 def cmd_list(args: argparse.Namespace) -> int:
     in_dir = Path(args.dir)
-    files  = _scan_files(in_dir)
 
     if not in_dir.exists():
-        _err(f"Directory not found: {in_dir}")
+        print(f"  error: directory not found: {in_dir}", file=sys.stderr)
         return 1
 
-    if not files:
-        _warn(f"No supported files found in  {in_dir}/")
-        _tip(f"Supported extensions: {', '.join(sorted(SUPPORTED_EXTS))}")
-        return 0
+    files = _scan_files(in_dir)
 
-    print(f"\n  {clr(GRY, str(in_dir.resolve()))}\n")
-    name_w = max(len(f.name) for f in files) + 2
-    for f in files:
-        size_kb = f.stat().st_size / 1024.0
-        pad = " " * (name_w - len(f.name))
-        print(f"  {clr(GRN, '•')}  {clr(WHT, f.name)}{pad}{clr(GRY, f'{size_kb:>8.1f} KB')}")
-    print(f"\n  {clr(GRY, f'{len(files)} file(s) found.')}\n")
+    print(f"\n  {clr(B+BLU, 'rbxbundle list')}  {clr(GRY, str(in_dir))}")
+    print()
+
+    if not files:
+        print(f"  {clr(GRY, 'no supported files found.')}")
+        print(f"  {clr(GRY, 'supported: ' + ', '.join(sorted(SUPPORTED_EXTS)))}")
+    else:
+        name_w = max(len(f.name) for f in files) + 2
+        for f in files:
+            size_kb = f.stat().st_size / 1024.0
+            pad = " " * (name_w - len(f.name))
+            print(f"  {clr(WHT, f.name)}{pad}{clr(GRY, f'{size_kb:.1f} KB')}")
+        print(f"\n  {clr(GRY, f'{len(files)} file(s)')}")
+    print()
     return 0
 
 
 def _build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rbxbundle",
-        description="rbxbundle — .rbxmx Context Bundler",
+        description="rbxbundle — bundle extractor for Roblox .rbxmx / .rbxlx files",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             examples:
-              python cli.py build MyModel.rbxmx
-              python cli.py build MyModel.rbxmx --output ./out --no-context
-              python cli.py inspect MyModel.rbxmx
-              python cli.py list
-              python cli.py list --dir ./models
-
-            Run without arguments to open the interactive menu.
+              rbxbundle build MyModel.rbxmx
+              rbxbundle build MyModel.rbxmx --output ./out --no-context
+              rbxbundle inspect MyModel.rbxmx
+              rbxbundle list
+              rbxbundle list --dir ./models
+              rbxbundle --mode interactive
         """),
     )
-    parser.add_argument("--verbose", "-v", action="store_true",
-                        help="Enable debug logging.")
+
+    parser.add_argument(
+        "--mode",
+        choices=["interactive", "argparse"],
+        metavar="MODE",
+        help="Set and save the default startup mode  (interactive | argparse).",
+    )
+    # --verbose is intentionally kept but suppressed from help — it's a dev tool
+    parser.add_argument("--verbose", "-v", action="store_true", help=argparse.SUPPRESS)
 
     sub = parser.add_subparsers(dest="command")
 
@@ -568,18 +689,18 @@ def _build_argparser() -> argparse.ArgumentParser:
     pb = sub.add_parser("build", help="Generate a bundle from a Roblox file.")
     pb.add_argument("file", help=".rbxmx / .rbxlx / .xml / .txt file to process.")
     pb.add_argument("--output", "-o", default=str(DEFAULT_OUTPUT_DIR),
-                    metavar="DIR", help=f"Output directory (default: {DEFAULT_OUTPUT_DIR}).")
+                    metavar="DIR", help=f"Output directory  (default: {DEFAULT_OUTPUT_DIR}).")
     pb.add_argument("--no-context", action="store_true",
                     help="Skip CONTEXT.txt generation.")
 
     # inspect
-    pi = sub.add_parser("inspect", help="Show stats for a file without building.")
+    pi = sub.add_parser("inspect", help="Show stats for a file without writing output.")
     pi.add_argument("file", help=".rbxmx / .rbxlx / .xml / .txt file to inspect.")
 
     # list
     pl = sub.add_parser("list", help="List supported files in a directory.")
     pl.add_argument("--dir", "-d", default=str(DEFAULT_INPUT_DIR),
-                    metavar="DIR", help=f"Directory to scan (default: {DEFAULT_INPUT_DIR}).")
+                    metavar="DIR", help=f"Directory to scan  (default: {DEFAULT_INPUT_DIR}).")
 
     return parser
 
@@ -589,18 +710,43 @@ def _build_argparser() -> argparse.ArgumentParser:
 # ==================================================
 
 def main() -> None:
-    # Decide mode BEFORE argparse sees argv, so argparse never interferes
-    # with the interactive menu.
+    cfg = _load_config()
+
     args_passed = sys.argv[1:]
     first = args_passed[0] if args_passed else ""
 
-    use_argparse = first in _ARGPARSE_COMMANDS
+    # --mode flag: save preference and exit (or continue if no sub-command)
+    if "--mode" in args_passed:
+        parser = _build_argparser()
+        args = parser.parse_args()
+        if args.mode:
+            cfg["startup_mode"] = args.mode
+            _save_config(cfg)
+            label = clr(GRN, "interactive") if args.mode == "interactive" else clr(YLW, "argparse")
+            print(f"\n  {clr(GRN, '✔')}  startup mode set to {label}")
+            print(f"  {clr(GRY, f'saved to {_CONFIG_PATH}')}\n")
+            # if no sub-command was given alongside --mode, just exit
+            if not args.command:
+                sys.exit(0)
+            # otherwise fall through to dispatch below
+            level = logging.DEBUG if getattr(args, "verbose", False) else logging.WARNING
+            setup_logging(level)
+            dispatch = {"build": cmd_build, "inspect": cmd_inspect, "list": cmd_list}
+            handler = dispatch.get(args.command)
+            if handler:
+                sys.exit(handler(args))
+            sys.exit(0)
+
+    # Explicit sub-command → argparse mode (always, regardless of config)
+    # No argv → use saved startup_mode
+    use_argparse = first in _ARGPARSE_COMMANDS or (
+        not args_passed and cfg["startup_mode"] == "argparse"
+    )
 
     if use_argparse:
-        # === Argparse mode ===============================
         parser = _build_argparser()
         args   = parser.parse_args()
-        level  = logging.DEBUG if args.verbose else logging.INFO
+        level  = logging.DEBUG if getattr(args, "verbose", False) else logging.WARNING
         setup_logging(level)
 
         dispatch = {
@@ -615,8 +761,7 @@ def main() -> None:
         sys.exit(handler(args))
 
     else:
-        # === Interactive mode ==============================
-        setup_logging(logging.WARNING)   # suppress INFO noise in TUI
+        setup_logging(logging.WARNING)
         _imode_main_menu()
 
 
