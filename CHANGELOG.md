@@ -93,3 +93,57 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - Updated versioning and related test expectations.
+
+## [0.4.0] - 2026-03-02
+
+### Added
+- Added argparse-based CLI flow and improved command handling.
+- Added `SUMMARY.md` generation as a standard output artifact.
+- Added public API exposure for programmatic usage.
+- Added broad parser and dependency test coverage, including a dedicated batch of unit tests.
+
+### Changed
+- Restructured internal project modules to support clearer separation of responsibilities.
+- Updated README and project documentation to reflect package naming and usage.
+
+### Fixed
+- Fixed dependency analysis behavior for alias resolution and dynamic/heuristic edge reporting.
+- Fixed XML parsing validation paths for malformed or inconsistent files.
+- Fixed duplicated script handling and AttributeSerialized default export behavior.
+
+## [0.3.0] - 2026-02-27
+
+### Added
+- Added project-version status documentation to reflect the current development stage.
+
+### Changed
+- Consolidated the transition period between parser hardening and release preparation.
+
+## [0.2.0] - 2026-02-26
+
+### Added
+- Added XML verification systems for problematic input files.
+- Added attribute parsing and richer extraction/export context.
+- Added duplicate-name processing for scripts during extraction.
+- Added module logging and early dependency-analysis test coverage.
+
+### Changed
+- Reworked project structure into a modular architecture.
+- Updated limitations/documentation as dependency support evolved.
+
+### Fixed
+- Fixed duplicate scripts in `/scripts` output.
+- Fixed AttributeSerialized export behavior with default attributes.
+- Fixed dependency graph quality by resolving aliases and preserving dynamic + heuristic links.
+
+## [0.1.0] - 2026-02-25
+
+### Added
+- Initial project foundation and first parser implementation.
+- Initial README and baseline project documentation.
+
+### Changed
+- Renamed scripts/files to better match Python naming conventions.
+
+### Fixed
+- Added initial `.gitignore` handling for generated input/output bundle artifacts.
